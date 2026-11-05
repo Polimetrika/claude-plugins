@@ -386,17 +386,18 @@ def write_object_description(spec: Spec, path: Path) -> None:
         ["Ассортимент", o["assortment"]],
         ["Единица выпуска", f"{p['title']}, {p['unit']}"],
         ["Средний выпуск в рабочие сутки", f"{_fmt((p['daily_min'] + p['daily_max']) / 2)} {p['unit']}"],
+        ["Тариф на электроэнергию без НДС, руб./кВт·ч", _fmt(float(spec.supply["tariff_rub_per_kwh"]), 2)],
     ]
     _docx_table(d, ["Показатель", "Значение"], rows)
     if spec.circuits:
-        d.add_heading("2. Производственные участки", level=2)
+        d.add_heading("2. Контуры энергомодели", level=2)
+        titles = ", ".join(c["title"] for c in spec.circuits)
+        d.add_paragraph(f"Контуры энергомодели объекта: {titles}. Других контуров нет.")
+        circuit_rows = []
         for c in spec.circuits:
             units = ", ".join(e.name for e in spec.equipment if e.circuit == c["key"])
-            d.add_paragraph(
-                f"Участок «{c['title']}» (ключ {c['key']}): выпуск учитывается в {c.get('driver_unit', p['unit'])}. "
-                f"Основное оборудование: {units or '—'}. {c.get('description', '')}".strip(),
-                style="List Bullet",
-            )
+            circuit_rows.append([c["title"], c["key"], c.get("driver_unit", p["unit"]), units or "—"])
+        _docx_table(d, ["Контур", "Ключ", "Единица выпуска", "Основное оборудование"], circuit_rows)
     d.add_heading("3. Инженерные системы", level=2)
     systems = [e for e in spec.equipment if e.profile not in ("process",)]
     for e in systems:
@@ -449,17 +450,16 @@ def write_inventory(spec: Spec, path: Path) -> None:
     ws.append(["Ведомость оборудования (перечень электроприёмников)"])
     ws.append([f"{spec.obj['name']}, {spec.obj['address']}"])
     ws.append([])
-    ws.append(["№ п/п", "Наименование", "Марка, модель", "Кол-во, шт", "Мощность, кВт", "Место установки"])
+    # Без колонки «№ п/п»: в блоках document-service номер склеивается с наименованием («1 Ростер …»).
+    ws.append(["Наименование", "Марка, модель", "Кол-во, шт", "Мощность, кВт", "Место установки"])
     for cell in ws[4]:
         cell.font = Font(bold=True)
     ws["A1"].font = Font(bold=True, size=13)
-    n = 0
     for e in spec.equipment:
         if not e.in_inventory:
             continue
-        n += 1
-        ws.append([n, e.name, e.model, e.count, e.rated_kw, e.location])
-    for column, width in zip("ABCDEF", (7, 38, 26, 11, 14, 26), strict=True):
+        ws.append([e.name, e.model, e.count, e.rated_kw, e.location])
+    for column, width in zip("ABCDE", (38, 26, 11, 14, 26), strict=True):
         ws.column_dimensions[column].width = width
     wb.save(path)
 
