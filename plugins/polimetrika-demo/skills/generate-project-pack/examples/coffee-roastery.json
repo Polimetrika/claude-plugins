@@ -1,0 +1,46 @@
+{
+  "seed": 37,
+  "object": {
+    "name": "Обжарочный цех «Северное зерно»",
+    "company": "ООО «Северное зерно»",
+    "address": "г. Самара, ул. Промышленная, 12, корпус 3",
+    "area_m2": 1380,
+    "timezone": "Europe/Samara",
+    "climate_zone": "II В",
+    "assortment": "Кофе в зёрнах и молотый, фасовка 250 г и 1 кг",
+    "shifts": {"title": "1 смена, 07:00–19:00, пн–пт", "start_hour": 7, "end_hour": 19, "weekdays": [0, 1, 2, 3, 4]},
+    "description": "Обжарка партиями по 60–120 кг, фасовка в азотной среде. Цех охлаждается двумя ККБ."
+  },
+  "supply": {
+    "supplier": "ПАО «Регионэнергосбыт»",
+    "contract_number": "63-0417-ЭС",
+    "max_power_kw": 290,
+    "tariff_rub_per_kwh": 7.82,
+    "tariff_category": 1,
+    "supply_points": ["ВРУ-0,4 кВ корпуса 3 (ТП-112)"]
+  },
+  "product": {"title": "Кофе обжаренный", "unit": "кг", "daily_min": 1500, "daily_max": 2300},
+  "circuits": [
+    {"key": "roasting", "title": "Обжарка", "driver_unit": "кг"},
+    {"key": "packing", "title": "Фасовка", "driver_unit": "кг"}
+  ],
+  "equipment": [
+    {"key": "roaster", "name": "Ростер", "model": "Probat G60", "count": 3, "rated_kw": 18, "profile": "process", "load": 0.75, "idle": 0.0, "location": "Участок обжарки", "circuit": "roasting"},
+    {"key": "packing_line", "name": "Линия фасовки", "model": "Fres-co FX", "count": 1, "rated_kw": 12, "profile": "process", "load": 0.7, "idle": 0.0, "location": "Участок фасовки", "circuit": "packing"},
+    {"key": "compressor", "name": "Компрессор винтовой", "model": "Atlas Copco GA15", "count": 2, "rated_kw": 15, "profile": "shift_system", "load": 0.65, "idle": 0.0, "location": "Компрессорная"},
+    {"key": "nitrogen", "name": "Азотная станция", "model": "Provita PSA-10", "count": 1, "rated_kw": 5.5, "profile": "shift_system", "load": 0.9, "idle": 0.0, "location": "Компрессорная", "circuit": "packing"},
+    {"key": "supply_vent", "name": "Приточная установка ПВ-1", "model": "Breezart 6000", "count": 1, "rated_kw": 11, "profile": "ventilation", "load": 0.8, "idle": 0.0, "location": "Венткамера"},
+    {"key": "exhaust", "name": "Вытяжка участка обжарки", "model": "ВР-86-77", "count": 1, "rated_kw": 4, "profile": "process", "load": 0.9, "idle": 0.0, "location": "Участок обжарки", "circuit": "roasting", "metered": false},
+    {"key": "kkb", "name": "Компрессорно-конденсаторный блок", "model": "Daikin ERQ250", "count": 2, "rated_kw": 9, "profile": "cooling", "load": 0.8, "idle": 0.0, "location": "Кровля"},
+    {"key": "lighting", "name": "Освещение цеха", "model": "LED 150 Вт", "count": 1, "rated_kw": 6, "profile": "lighting", "load": 1.0, "idle": 0.05, "location": "Цех", "metered": false},
+    {"key": "air_curtain", "name": "Тепловая завеса ворот", "model": "Тепломаш КЭВ-12", "count": 1, "rated_kw": 12, "profile": "heating", "load": 0.6, "location": "Ворота склада", "in_inventory": false, "metered": false}
+  ],
+  "anomalies": [
+    {"type": "off_shift", "equipment": "compressor", "share": 0.35, "title": "Компрессоры работают вне смены (утечки сжатого воздуха)"},
+    {"type": "unit_overconsumption", "equipment": "kkb", "unit": 2, "extra": 0.41, "title": "ККБ-2 потребляет на 41 % больше ККБ-1"},
+    {"type": "no_night_setback", "equipment": "supply_vent"}
+  ],
+  "period": {"end": "2026-10-31", "bill_months": 12, "telemetry_days": 31},
+  "climate": {"t_mean": 5.5, "t_amp": 16, "t_day_amp": 4.5},
+  "call_notes": ["Ростер №3 включаем только под крупные заказы, обычно работают два."]
+}

@@ -1,0 +1,17 @@
+{
+  "name": "polimetrika",
+  "owner": {
+    "name": "Полиметрика",
+    "url": "https://polimetrika.ru"
+  },
+  "metadata": {
+    "description": "Плагины Полиметрики для Claude: демо-данные и работа с сервисом энергомониторинга."
+  },
+  "plugins": [
+    {
+      "name": "polimetrika-demo",
+      "source": "./plugins/polimetrika-demo",
+      "description": "Пакет документов демо-объекта для пробы Полиметрики без своих данных."
+    }
+  ]
+}
