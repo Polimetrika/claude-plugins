@@ -547,9 +547,26 @@ def write_inventory(spec: Spec, path: Path) -> None:
         if not e.in_inventory:
             continue
         ws.append([e.name, e.model, e.count, e.rated_kw, e.location])
-    for column, width in zip("ABCDE", (38, 26, 11, 14, 26), strict=True):
-        ws.column_dimensions[column].width = width
+    _fit_columns(ws, (38, 26, 14, 18, 28), numeric="CD")
     wb.save(path)
+
+
+def _fit_columns(ws: Any, widths: tuple[int, ...], numeric: str = "") -> None:
+    """Ширины колонок с запасом и числа по центру ячейки.
+
+    Document-service печатает лист через LibreOffice и собирает таблицу из текстового слоя PDF. Узкая
+    колонка обрезает текст («Компрессо»), а число, прижатое к правой границе, сливается с текстом
+    соседней ячейки в одну строку слоя («18 Участок обжарки»): колонки мощности и места установки
+    склеиваются, и количество с мощностью не доходят до узлов модели.
+    """
+    from openpyxl.styles import Alignment  # noqa: PLC0415
+    from openpyxl.utils import get_column_letter  # noqa: PLC0415
+
+    for index, width in enumerate(widths, start=1):
+        ws.column_dimensions[get_column_letter(index)].width = width
+    for column in numeric:
+        for cell in ws[column]:
+            cell.alignment = Alignment(horizontal="center")
 
 
 def _pdf_font() -> str | None:
@@ -790,6 +807,7 @@ def write_telemetry(spec: Spec, sim: Simulation, folder: Path) -> list[dict[str,
     for device in devices:
         ws.append([device["device"], "Меркурий 230", device["title"], by_key[device["equipment"]].location])
     ws.append(["street-t1", "Датчик температуры", "Наружный воздух", "Северная стена"])
+    _fit_columns(ws, (24, 22, max(24, *(len(d["title"]) + 4 for d in devices)), 24))
     wb.save(folder / "перечень_приборов_учёта.xlsx")
     return [{k: v for k, v in d.items() if k != "series"} for d in devices]
 
