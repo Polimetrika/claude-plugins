@@ -80,6 +80,28 @@ class Spec:
     telemetry_days: int
     climate: dict[str, float]
     call_notes: list[str] = field(default_factory=list)
+    links: list[Link] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class Link:
+    """Связь энергомодели, которую технолог проговаривает в разговоре, а агент собирает при разборе.
+
+    `source` — ключ оборудования или `output` (выпуск продукции), `target` — ключ оборудования.
+    """
+
+    source: str
+    target: str
+    kind: str
+    method: str | None = None
+    say: str | None = None
+
+
+#: Выпуск продукции как источник связи: узел-драйвер, который агент заводит сам.
+OUTPUT = "output"
+LINK_KINDS = {"metric", "process", "unmeasured"}
+#: Методы связи-измерения, которые агент считает по данным (docs#610): от выпуска, в окне процесса.
+LINK_METHODS = {"regression", "window", "window_const"}
 
 
 def _req(data: dict[str, Any], key: str, where: str) -> Any:
@@ -140,6 +162,7 @@ def load_spec(path: Path) -> Spec:
             raise SpecError(f"anomalies[{i}].type: одно из {sorted(ANOMALIES)}")
         if anomaly.get("equipment") not in keys:
             raise SpecError(f"anomalies[{i}].equipment: нет оборудования «{anomaly.get('equipment')}»")
+    links = _links(raw.get("links"), equipment, circuits)
     period = raw.get("period") or {}
     end = date.fromisoformat(period["end"]) if period.get("end") else _last_full_month_end(date.today())
     return Spec(
@@ -156,7 +179,72 @@ def load_spec(path: Path) -> Spec:
         telemetry_days=int(period.get("telemetry_days", 31)),
         climate={"t_mean": 5.0, "t_amp": 15.0, "t_day_amp": 4.0, **(raw.get("climate") or {})},
         call_notes=list(raw.get("call_notes") or []),
+        links=links,
     )
+
+
+def _link_from(item: Any, where: str, keys: set[str]) -> Link:
+    if not isinstance(item, dict):
+        raise SpecError(f"{where}: ожидается объект")
+    source, target, kind = _req(item, "from", where), _req(item, "to", where), _req(item, "kind", where)
+    if source != OUTPUT and source not in keys:
+        raise SpecError(f"{where}.from: нет оборудования «{source}» (или «{OUTPUT}» — выпуск)")
+    if target not in keys or target == source:
+        raise SpecError(f"{where}.to: нет оборудования «{target}»")
+    if kind not in LINK_KINDS:
+        raise SpecError(f"{where}.kind: одно из {sorted(LINK_KINDS)}")
+    method = item.get("method")
+    if kind == "metric" and method not in LINK_METHODS:
+        raise SpecError(f"{where}.method: у связи-измерения одно из {sorted(LINK_METHODS)}")
+    if kind != "metric" and method is not None:
+        raise SpecError(f"{where}.method: метод только у связи-измерения (kind: metric)")
+    if kind == "process" and source == OUTPUT:
+        raise SpecError(f"{where}: технологическая связь — между оборудованием, не от выпуска")
+    return Link(source, target, kind, method, item.get("say"))
+
+
+def _links(raw: Any, equipment: list[Equipment], circuits: list[dict[str, Any]]) -> list[Link]:
+    """Связи из спецификации; без поля `links` — по профилям и участкам (`default_links`)."""
+    if raw is None:
+        return default_links(equipment, circuits)
+    if not isinstance(raw, list):
+        raise SpecError("links: ожидается список")
+    keys = {e.key for e in equipment}
+    found = [_link_from(item, f"links[{i}]", keys) for i, item in enumerate(raw)]
+    pairs = [(link.source, link.target) for link in found]
+    if len(pairs) != len(set(pairs)):
+        raise SpecError("links: связь между одной парой — один раз")
+    return found
+
+
+def default_links(equipment: list[Equipment], circuits: list[dict[str, Any]]) -> list[Link]:
+    """Связи по участкам: технологическое оборудование — от выпуска, остальное — в окне процесса участка.
+
+    Участки идут по порядку `circuits`: продукт с участка переходит на следующий. Вспомогательное
+    оборудование вне участка (компрессоры, ККБ, освещение) связей не получает: их агент предложит сам по
+    данным датчиков. Нужны другие связи — их задают полем `links`.
+    """
+    found: list[Link] = []
+    previous: Equipment | None = None
+    for circuit in circuits:
+        members = [e for e in equipment if e.circuit == circuit["key"] and e.in_inventory]
+        lead = next((e for e in members if e.profile == "process" and e.metered), None)
+        if lead is None:
+            continue
+        found.append(Link(OUTPUT, lead.key, "metric", "regression"))
+        if previous is not None:
+            found.append(Link(previous.key, lead.key, "process"))
+        for e in members:
+            if e is lead:
+                continue
+            if not e.metered:
+                found.append(Link(lead.key, e.key, "unmeasured"))
+            elif e.profile == "process":
+                found.append(Link(OUTPUT, e.key, "metric", "regression"))
+            else:
+                found.append(Link(lead.key, e.key, "metric", "window"))
+        previous = lead
+    return found
 
 
 def _last_full_month_end(today: date) -> date:
@@ -601,6 +689,30 @@ _ANOMALY_LINES = {
 }
 
 
+def _lower(name: str) -> str:
+    return name[:1].lower() + name[1:]
+
+
+def link_line(link: Link, by_key: dict[str, Equipment], product: dict[str, Any]) -> str:
+    """Как технолог говорит о связи. Название из ведомости стоит в именительном падеже: склонять его
+    генератор не умеет, а агенту нужно узнать узел."""
+    if link.say:
+        return link.say
+    target = by_key[link.target].name
+    if link.source == OUTPUT:
+        return (f"{target}: потребление идёт за выпуском — больше {product['unit']} за день, больше и берёт, "
+                "без выпуска простаивает.")
+    source = _lower(by_key[link.source].name)
+    if link.kind == "process":
+        return f"Продукт идёт по цепочке: сначала {source}, потом {_lower(target)}."
+    if link.kind == "unmeasured":
+        return f"{target} включается, когда работает {source}; своего счётчика нет, сидит на общем."
+    if link.method == "window_const":
+        return (f"{target} включаем, только когда работает {source}; нагрузка ровная, "
+                "от объёма почти не зависит.")
+    return f"{target} включаем, только когда работает {source}; остановились — можно выключать."
+
+
 def write_call_transcript(spec: Spec, path: Path) -> None:
     by_key = {e.key: e for e in spec.equipment}
     shifts = spec.obj["shifts"]["title"]
@@ -610,6 +722,10 @@ def write_call_transcript(spec: Spec, path: Path) -> None:
                      f"в среднем {_fmt((spec.product['daily_min'] + spec.product['daily_max']) / 2)} "
                      f"{spec.product['unit']} за смену."),
     ]
+    if spec.links:
+        lines.append(("Энергетик", "Расскажи, что от чего зависит: что идёт за выпуском, что работает под какой участок."))
+        lines += [("Технолог", link_line(link, by_key, spec.product)) for link in spec.links]
+        lines.append(("Энергетик", "Понял, так и свяжем в модели."))
     for anomaly in spec.anomalies:
         e = by_key[anomaly["equipment"]]
         template = anomaly.get("hint") or _ANOMALY_LINES[anomaly["type"]]
@@ -678,6 +794,15 @@ def write_telemetry(spec: Spec, sim: Simulation, folder: Path) -> list[dict[str,
     return [{k: v for k, v in d.items() if k != "series"} for d in devices]
 
 
+LINK_KIND_TITLES = {"metric": "измерение", "process": "технологическая", "unmeasured": "без измерения"}
+LINK_METHOD_TITLES = {"regression": "от выпуска", "window": "в окне процесса",
+                      "window_const": "в окне, постоянная нагрузка"}
+
+
+def _link_end(key: str, by_key: dict[str, Equipment]) -> str:
+    return "Выпуск продукции" if key == OUTPUT else by_key[key].name
+
+
 def write_answers(spec: Spec, sim: Simulation, bills_: list[Bill], path: Path) -> list[dict[str, Any]]:
     tariff = float(spec.supply["tariff_rub_per_kwh"])
     by_key = {e.key: e for e in spec.equipment}
@@ -715,6 +840,12 @@ def write_answers(spec: Spec, sim: Simulation, bills_: list[Bill], path: Path) -
         "|---|---:|---:|",
         *[f"| {f['title']} | {_fmt(f['kwh_per_year'])} | {_fmt(f['rub_per_year'])} |" for f in findings],
     ]
+    if spec.links:
+        lines += ["", "## Связи, которые проговорил технолог", "",
+                  "Агент должен собрать их при разборе расшифровки в карточку «Оборудование и учёт».", "",
+                  "| Откуда | Куда | Вид | Метод |", "|---|---|---|---|",
+                  *[f"| {_link_end(link.source, by_key)} | {by_key[link.target].name} | {LINK_KIND_TITLES[link.kind]} "
+                    f"| {LINK_METHOD_TITLES.get(link.method or '', '—')} |" for link in spec.links]]
     hidden = [e for e in spec.equipment if not e.in_inventory]
     if hidden:
         lines += ["", "## Не внесено в ведомость", "",
@@ -730,7 +861,8 @@ HOW_TO = """# Как загрузить пакет в Полиметрику
 2. В чат помощника приложите ВСЕ файлы из папки `upload/` (можно одним сообщением) и напишите:
    «Разбери документы и заполни проект».
 3. Дождитесь распознавания (1–5 минут) и проверьте карточки предложений: параметры объекта,
-   энергомодель, оборудование, ряды по счетам, выпуск. Нажмите «Подтвердить».
+   энергомодель, оборудование, ряды по счетам, выпуск. Связи, которые технолог проговорил в разговоре,
+   лежат в той же карточке «Оборудование и учёт», что и узлы, с цитатой из разговора. Нажмите «Подтвердить».
 4. Спросите помощника о разговоре с технологом: «Что из разговора с технологом стоит внести в модель?»
 
 5. Показания приборов: приложите в тот же чат `telemetry/показания_приборов_учёта.csv` вместе

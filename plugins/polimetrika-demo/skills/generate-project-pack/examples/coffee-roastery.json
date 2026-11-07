@@ -40,6 +40,14 @@
     {"type": "unit_overconsumption", "equipment": "kkb", "unit": 2, "extra": 0.41, "title": "ККБ-2 потребляет на 41 % больше ККБ-1"},
     {"type": "no_night_setback", "equipment": "supply_vent"}
   ],
+  "links": [
+    {"from": "output", "to": "roaster", "kind": "metric", "method": "regression"},
+    {"from": "roaster", "to": "packing_line", "kind": "process"},
+    {"from": "output", "to": "packing_line", "kind": "metric", "method": "regression"},
+    {"from": "packing_line", "to": "compressor", "kind": "metric", "method": "window", "say": "Компрессоры дают сжатый воздух только на линию фасовки: пока фасовка работает — нужны, остановили фасовку — компрессоры можно глушить."},
+    {"from": "packing_line", "to": "nitrogen", "kind": "metric", "method": "window_const", "say": "Азотная станция работает только на фасовку, азот идёт в упаковку. Нагрузка у неё ровная, от объёма почти не зависит."},
+    {"from": "roaster", "to": "exhaust", "kind": "unmeasured"}
+  ],
   "period": {"end": "2026-10-31", "bill_months": 12, "telemetry_days": 31},
   "climate": {"t_mean": 5.5, "t_amp": 16, "t_day_amp": 4.5},
   "call_notes": ["Ростер №3 включаем только под крупные заказы, обычно работают два."]
