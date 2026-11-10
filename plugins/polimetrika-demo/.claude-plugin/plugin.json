@@ -1,6 +1,6 @@
 {
   "name": "polimetrika-demo",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "description": "Демо-данные для Полиметрики: пакет документов вымышленного производственного объекта для пробы сервиса без своих данных.",
   "author": {"name": "Полиметрика", "url": "https://polimetrika.ru"},
   "homepage": "https://polimetrika.ru",
