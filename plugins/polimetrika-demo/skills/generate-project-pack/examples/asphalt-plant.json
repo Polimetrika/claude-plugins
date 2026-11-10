@@ -1,0 +1,66 @@
+{
+  "seed": 37,
+  "object": {
+    "name": "Асфальтобетонный завод «Южный тракт»",
+    "company": "ООО «Южный тракт»",
+    "address": "Краснодарский край, Северский р-н, промзона, ул. Дорожная, 5",
+    "area_m2": 4200,
+    "timezone": "Europe/Moscow",
+    "climate_zone": "III Б",
+    "assortment": "Горячие асфальтобетонные смеси типов А, Б, В; ЩМА-16, ЩМА-20; чёрный щебень",
+    "shifts": {"title": "2 смены, 07:00–23:00, пн–сб", "start_hour": 7, "end_hour": 23, "weekdays": [0, 1, 2, 3, 4, 5]},
+    "description": "Асфальтосмесительная установка циклического действия производительностью 160 т/ч. Сушка и нагрев каменных материалов в барабане с газовой горелкой, очистка дымовых газов в рукавном фильтре, битум хранится в четырёх ёмкостях с электрообогревом."
+  },
+  "supply": {
+    "supplier": "АО «Регион-Юг Энергосбыт»",
+    "contract_number": "23-1186-ЭС",
+    "max_power_kw": 620,
+    "tariff_rub_per_kwh": 8.64,
+    "tariff_category": 3,
+    "supply_points": ["КТП-630 кВА АБЗ (ВЛ-10 кВ ф. 14)"]
+  },
+  "product": {"title": "Асфальтобетонная смесь", "unit": "т", "daily_min": 600, "daily_max": 1150},
+  "circuits": [
+    {"key": "drying", "title": "Сушка и нагрев каменных материалов", "driver_unit": "т"},
+    {"key": "mixing", "title": "Смешение и выдача смеси", "driver_unit": "т"}
+  ],
+  "equipment": [
+    {"key": "feeder", "name": "Агрегат питания (дозаторы холодных бункеров)", "model": "ДС-185 АП-6", "count": 6, "rated_kw": 5.5, "profile": "process", "load": 0.7, "idle": 0.0, "location": "Площадка инертных", "circuit": "drying", "metered": false},
+    {"key": "dryer_drum", "name": "Сушильный барабан (привод)", "model": "СБ-160", "count": 4, "rated_kw": 15, "profile": "process", "load": 0.75, "idle": 0.0, "location": "Сушильный агрегат", "circuit": "drying"},
+    {"key": "burner_fan", "name": "Дутьевой вентилятор горелки", "model": "Weishaupt WKGL 80", "count": 1, "rated_kw": 55, "profile": "process", "load": 0.7, "idle": 0.0, "location": "Сушильный агрегат", "circuit": "drying", "metered": false},
+    {"key": "exhaust", "name": "Аспирация рукавного фильтра (дымосос)", "model": "ДН-15", "count": 1, "rated_kw": 132, "profile": "process", "load": 0.75, "idle": 0.0, "location": "Рукавный фильтр", "circuit": "drying"},
+    {"key": "hot_elevator", "name": "Горячий элеватор", "model": "ЭГ-160", "count": 1, "rated_kw": 30, "profile": "process", "load": 0.7, "idle": 0.0, "location": "Смесительная башня", "circuit": "mixing", "metered": false},
+    {"key": "screen", "name": "Грохот вибрационный", "model": "ГИС-62", "count": 2, "rated_kw": 11, "profile": "process", "load": 0.7, "idle": 0.0, "location": "Смесительная башня", "circuit": "mixing", "metered": false},
+    {"key": "mixer", "name": "Смеситель лопастной двухвальный", "model": "СЛ-2000", "count": 2, "rated_kw": 37, "profile": "process", "load": 0.7, "idle": 0.0, "location": "Смесительная башня", "circuit": "mixing"},
+    {"key": "bitumen_pump", "name": "Насос битумный", "model": "ДС-134", "count": 2, "rated_kw": 7.5, "profile": "process", "load": 0.6, "idle": 0.0, "location": "Битумохранилище", "circuit": "mixing", "metered": false},
+    {"key": "filler_screw", "name": "Шнековый питатель минерального порошка", "model": "ШП-200", "count": 1, "rated_kw": 8, "profile": "process", "load": 0.6, "idle": 0.0, "location": "Силос минерального порошка", "circuit": "mixing", "metered": false, "in_inventory": false},
+    {"key": "bitumen_heater", "name": "Электрообогрев битумных ёмкостей", "model": "ТЭН-блок 30 кВт, ёмкость 60 м³", "count": 4, "rated_kw": 30, "profile": "heating", "load": 0.55, "idle": 0.0, "location": "Битумохранилище"},
+    {"key": "compressor", "name": "Компрессор винтовой", "model": "Remeza ВК30", "count": 2, "rated_kw": 30, "profile": "shift_system", "load": 0.65, "idle": 0.0, "location": "Компрессорная"},
+    {"key": "air_conditioner", "name": "Канальный кондиционер операторской и лаборатории", "model": "Haier AD24", "count": 2, "rated_kw": 4, "profile": "cooling", "load": 0.8, "idle": 0.0, "location": "Операторская, лаборатория"},
+    {"key": "lighting", "name": "Освещение площадки и башни", "model": "LED прожекторы 200 Вт", "count": 1, "rated_kw": 14, "profile": "lighting", "load": 1.0, "idle": 0.1, "location": "Территория", "metered": false}
+  ],
+  "anomalies": [
+    {"type": "off_shift", "equipment": "compressor", "share": 0.3, "title": "Компрессоры работают вне смены (ресивер стравливает у затворов)", "hint": "Компрессор винтовой вроде бы на ночь выключают, но ресивер всё равно стравливает — шипит у затворов башни."},
+    {"type": "unit_overconsumption", "equipment": "bitumen_heater", "unit": 3, "extra": 0.35, "title": "Обогрев ёмкости №3 потребляет на 35 % больше остальных (повреждена теплоизоляция)", "hint": "На ёмкости №3 летом меняли люк, кожух потом толком не восстановили."},
+    {"type": "drift", "equipment": "exhaust", "unit": 1, "extra": 0.2, "title": "Дымосос: растёт потребление (забиваются рукава фильтра)", "hint": "Рукава в фильтре не меняли с прошлого сезона, перепад давления по прибору ползёт вверх."}
+  ],
+  "links": [
+    {"from": "output", "to": "dryer_drum", "kind": "metric", "method": "regression"},
+    {"from": "dryer_drum", "to": "mixer", "kind": "process"},
+    {"from": "output", "to": "mixer", "kind": "metric", "method": "regression"},
+    {"from": "dryer_drum", "to": "exhaust", "kind": "metric", "method": "window", "say": "Аспирация рукавного фильтра (дымосос) нужна только пока крутится сушильный барабан: барабан встал — дымосос можно останавливать."},
+    {"from": "mixer", "to": "compressor", "kind": "metric", "method": "window", "say": "Компрессор винтовой у нас на пневматику затворов смесителя и дозаторов, больше воздух никуда не идёт. Не мешаем — компрессоры не нужны."},
+    {"from": "dryer_drum", "to": "burner_fan", "kind": "unmeasured"},
+    {"from": "dryer_drum", "to": "feeder", "kind": "unmeasured"},
+    {"from": "mixer", "to": "hot_elevator", "kind": "unmeasured"},
+    {"from": "mixer", "to": "screen", "kind": "unmeasured"},
+    {"from": "mixer", "to": "bitumen_pump", "kind": "unmeasured"}
+  ],
+  "period": {"end": "2026-10-31", "bill_months": 12, "telemetry_days": 31},
+  "climate": {"t_mean": 12.5, "t_amp": 12, "t_day_amp": 5},
+  "call_notes": [
+    "Горелка на газе, так что основное электричество — это дымосос, барабан и смесители.",
+    "Битум держим горячим круглые сутки, иначе утром не раскачаем — ёмкости греются и в выходные.",
+    "Шнек минпорошка в ведомость, кажется, не внесли — его ставили отдельно, когда меняли силос."
+  ]
+}
