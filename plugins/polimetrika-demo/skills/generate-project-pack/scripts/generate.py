@@ -5,6 +5,7 @@
 которые помощник кабинета Полиметрики разбирает и применяет к проекту:
 
     upload/        что приложить к чату нового проекта
+    <папка>-upload.zip   та же upload/ одним архивом (рядом с папкой пакета)
     telemetry/     почасовые показания приборов учёта и перечень приборов (загружаются в чат помощника)
     ЧТО ЗАЛОЖЕНО.md   ответы: какие потери и аномалии спрятаны в данных
     summary.json   сводка для Claude: итоги, доли, файлы
@@ -29,6 +30,7 @@ import math
 import random
 import shutil
 import sys
+import zipfile
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -895,6 +897,19 @@ HOW_TO = """# Как загрузить пакет в Полиметрику
 """
 
 
+def pack_upload(upload: Path, target: Path) -> Path:
+    """Складывает `upload/` в ZIP с кириллическими именами, которые Windows читает без кракозябр.
+
+    `zipfile` сам ставит флаг UTF-8 (бит 11) для имён вне ASCII. Архив, собранный утилитой `zip` или
+    моделью «на глаз», этого флага часто не имеет — тогда Проводник Windows читает имена в cp866.
+    """
+    with zipfile.ZipFile(target, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        for path in sorted(upload.rglob("*")):
+            if path.is_file():
+                zf.write(path, path.relative_to(upload).as_posix())
+    return target
+
+
 def build(spec: Spec, out: Path) -> dict[str, Any]:
     if out.exists():
         shutil.rmtree(out)
@@ -941,6 +956,7 @@ def build(spec: Spec, out: Path) -> dict[str, Any]:
         "devices": devices,
         "pdf_font": font is not None,
         "upload_files": [str(p.relative_to(out)) for p in files],
+        "upload_zip": str(pack_upload(upload, out.with_name(f"{out.name}-upload.zip"))),
     }
     (out / "summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
     return summary
@@ -958,7 +974,7 @@ def main() -> int:
         return 2
     summary = build(spec, args.out)
     print(json.dumps({k: summary[k] for k in ("object", "period", "total_kwh", "production_total",
-                                                "findings", "pdf_font", "upload_files")},
+                                                "findings", "pdf_font", "upload_files", "upload_zip")},
                      ensure_ascii=False, indent=2))
     return 0
 
