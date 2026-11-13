@@ -6,11 +6,13 @@
 
     upload/        что приложить к чату нового проекта
     <папка>-upload.zip   та же upload/ одним архивом (рядом с папкой пакета)
-    telemetry/     почасовые показания приборов учёта и перечень приборов (загружаются в чат помощника)
+    telemetry/     почасовые показания приборов учёта (электроэнергия; газ, тепло, вода на вводах) и перечень
+                   приборов — загружаются в чат помощника
     ЧТО ЗАЛОЖЕНО.md   ответы: какие потери и аномалии спрятаны в данных
     summary.json   сводка для Claude: итоги, доли, файлы
 
 Все документы считаются из ОДНОЙ почасовой модели объекта: счета = сумма потребления оборудования,
+счета за газ, тепло и воду — из тех же часов, выпуска и улицы (поле ),
 выпуск управляет загрузкой процессного оборудования, показания приборов — те же часы. Поэтому данные
 сходятся между собой, а заложенные аномалии находятся анализом. Генерация детерминирована: тот же
 `seed` даёт тот же пакет.
@@ -42,6 +44,9 @@ MONTHS = [
 ]
 PROFILES = {"process", "shift_system", "constant", "cooling", "heating", "ventilation", "lighting"}
 ANOMALIES = {"off_shift", "unit_overconsumption", "no_night_setback", "drift"}
+#: Аномалии покупных ресурсов: у них вместо `equipment` поле `resource`.
+RESOURCE_ANOMALIES = {"water_leak": {"water"}, "heating_no_setback": {"gas", "heat"}}
+RESOURCES = ("gas", "heat", "water", "liquid_fuel")
 
 
 # --- Спецификация ---------------------------------------------------------------------------------
@@ -83,6 +88,8 @@ class Spec:
     climate: dict[str, float]
     call_notes: list[str] = field(default_factory=list)
     links: list[Link] = field(default_factory=list)
+    #: Покупные ресурсы кроме электроэнергии: газ, тепло, вода, жидкое топливо (`references/spec.md`).
+    resources: dict[str, dict[str, Any]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -158,10 +165,17 @@ def load_spec(path: Path) -> Spec:
     keys = [e.key for e in equipment]
     if len(keys) != len(set(keys)):
         raise SpecError("equipment: ключи должны быть уникальны")
+    resources = _resources(raw.get("resources"))
     anomalies = raw.get("anomalies") or []
     for i, anomaly in enumerate(anomalies):
-        if anomaly.get("type") not in ANOMALIES:
-            raise SpecError(f"anomalies[{i}].type: одно из {sorted(ANOMALIES)}")
+        kind = anomaly.get("type")
+        if kind in RESOURCE_ANOMALIES:
+            if anomaly.get("resource") not in RESOURCE_ANOMALIES[kind] & resources.keys():
+                raise SpecError(f"anomalies[{i}].resource: у «{kind}» ресурс из {sorted(RESOURCE_ANOMALIES[kind])}, "
+                                "описанный в `resources`")
+            continue
+        if kind not in ANOMALIES:
+            raise SpecError(f"anomalies[{i}].type: одно из {sorted(ANOMALIES | RESOURCE_ANOMALIES.keys())}")
         if anomaly.get("equipment") not in keys:
             raise SpecError(f"anomalies[{i}].equipment: нет оборудования «{anomaly.get('equipment')}»")
     links = _links(raw.get("links"), equipment, circuits)
@@ -182,7 +196,39 @@ def load_spec(path: Path) -> Spec:
         climate={"t_mean": 5.0, "t_amp": 15.0, "t_day_amp": 4.0, **(raw.get("climate") or {})},
         call_notes=list(raw.get("call_notes") or []),
         links=links,
+        resources=resources,
     )
+
+
+#: Обязательные поля ресурса: поставщик, договор и тариф без НДС в единицах счёта.
+_RESOURCE_FIELDS = {
+    "gas": ("supplier", "contract_number", "tariff_rub_per_1000m3"),
+    "heat": ("supplier", "contract_number", "tariff_rub_per_gcal", "heating_peak_gcal_h"),
+    "water": ("supplier", "contract_number", "tariff_rub_per_m3", "wastewater_tariff_rub_per_m3"),
+    "liquid_fuel": ("supplier", "price_rub_per_l", "l_per_work_day"),
+}
+
+
+def _resources(raw: Any) -> dict[str, dict[str, Any]]:
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        raise SpecError("resources: ожидается объект {ресурс: описание}")
+    for key, item in raw.items():
+        if key not in _RESOURCE_FIELDS:
+            raise SpecError(f"resources.{key}: ресурс из {list(RESOURCES)}")
+        for name in _RESOURCE_FIELDS[key]:
+            _req(item, name, f"resources.{key}")
+    gas = raw.get("gas")
+    if gas and not (gas.get("process_m3_per_unit") or gas.get("heating_peak_m3_h")):
+        raise SpecError("resources.gas: нужен расход на выпуск (process_m3_per_unit) или котельная (heating_peak_m3_h)")
+    if gas and gas.get("heating_peak_m3_h") and "heat" in raw:
+        raise SpecError("resources: отопление либо своей котельной на газе (gas.heating_peak_m3_h), "
+                        "либо от сети (heat)")
+    fuel = raw.get("liquid_fuel")
+    if fuel and fuel.get("fuel_kind", "diesel") not in FUEL_KINDS:
+        raise SpecError(f"resources.liquid_fuel.fuel_kind: одно из {sorted(FUEL_KINDS)}")
+    return {key: raw[key] for key in RESOURCES if key in raw}
 
 
 def _link_from(item: Any, where: str, keys: set[str]) -> Link:
@@ -306,7 +352,7 @@ def _outdoor(spec: Spec, ts: datetime, rng: random.Random) -> float:
 
 
 def _anomaly(spec: Spec, key: str, kind: str) -> dict[str, Any] | None:
-    return next((a for a in spec.anomalies if a["equipment"] == key and a["type"] == kind), None)
+    return next((a for a in spec.anomalies if a.get("equipment") == key and a["type"] == kind), None)
 
 
 def _unit_fraction(e: Equipment, hour: Hour, rng: random.Random) -> float:
@@ -430,6 +476,163 @@ def bills(spec: Spec, sim: Simulation) -> list[Bill]:
     return result
 
 
+def _indexed(spec: Spec, year: int, month: int) -> bool:
+    """Регулируемые тарифы индексируют 1 июля: до этой даты в году счёта тариф ниже."""
+    return (year, month) >= ((spec.end.year, 7) if spec.end.month >= 7 else (spec.end.year - 1, 7))
+
+
+def _vat(year: int) -> float:
+    return 0.22 if year >= 2026 else 0.20
+
+
+# --- Покупные ресурсы -----------------------------------------------------------------------------
+#
+# Газ, тепло и вода считаются по тем же часам, выпуску и улице, что и электроэнергия, но своим генератором
+# случайных чисел и после `simulate`: электрическая часть пакета от них не меняется ни в одной цифре.
+
+#: Подписи ресурсов в документах и ответах; единица — та, в которой ведётся учёт.
+RESOURCE_TITLES = {"gas": ("Природный газ", "м³"), "heat": ("Тепловая энергия", "Гкал"),
+                   "water": ("Холодная вода", "м³"), "liquid_fuel": ("Жидкое топливо", "л")}
+#: Топливо: название в накладной, плотность кг/л, т CO₂ на тонну (приказ Минприроды № 371), слова для шапки.
+FUEL_KINDS = {"diesel": ("Топливо дизельное ЕВРО, межсезонное, экологического класса К5", 0.84, 3.15,
+                         "дизельное топливо (ГСМ)"),
+              "fuel_oil": ("Мазут топочный М-100", 0.97, 3.11, "мазут топочный")}
+#: т CO₂ на тысячу м³ природного газа (решение владельца 11.11).
+GAS_CO2_T_PER_1000M3 = 1.80
+#: Ночное снижение отопления вне смены: доля дневного расхода.
+HEATING_SETBACK = 0.6
+#: Отопительный сезон: отопление включено в сутки со средней температурой улицы ниже этой, °C. Летом
+#: счёт за отопление нулевой, как у ИТП и котельной по графику сезона.
+HEATING_SEASON_C = 10.0
+#: Ночная база водомера без утечки, м³/ч: капельный расход, ниже порога детектора утечки.
+WATER_NIGHT_BASE_M3_H = 0.004
+
+
+@dataclass
+class ResourceSeries:
+    """Часовой расход ресурса (м³ или Гкал) с заложенными аномалиями и без них."""
+
+    hourly: list[float]
+    baseline: list[float]
+
+
+@dataclass
+class ResourceBill:
+    resource: str
+    year: int
+    month: int
+    #: Объём в единице учёта: м³, Гкал, л. У воды — холодная вода, водоотведение отдельно.
+    volume: float
+    tariff: float
+    vat: float
+    wastewater: float = 0.0
+    wastewater_tariff: float = 0.0
+
+    @property
+    def net(self) -> float:
+        per_unit = self.volume / 1000 if self.resource == "gas" else self.volume  # газ — за тысячу м³
+        return round(per_unit * self.tariff, 2) + round(self.wastewater * self.wastewater_tariff, 2)
+
+    @property
+    def gross(self) -> float:
+        return round(self.net * (1 + self.vat), 2)
+
+
+def _heating(t_out: float) -> float:
+    """Потребность в отоплении, доля пиковой: та же кривая, что у профиля `heating` электроэнергии."""
+    return min(1.0, max(0.0, (16 - t_out) / 32))
+
+
+def _heating_days(sim: Simulation) -> set[date]:
+    temps: dict[date, list[float]] = {}
+    for hour in sim.hours:
+        temps.setdefault(hour.ts.date(), []).append(hour.t_out)
+    return {day for day, values in temps.items() if sum(values) / len(values) < HEATING_SEASON_C}
+
+
+def _work_hours(sim: Simulation) -> dict[date, int]:
+    counts: dict[date, int] = {}
+    for hour in sim.hours:
+        counts[hour.ts.date()] = counts.get(hour.ts.date(), 0) + (1 if hour.is_work else 0)
+    return counts
+
+
+def _resource_anomaly(spec: Spec, resource: str, kind: str) -> dict[str, Any] | None:
+    return next((a for a in spec.anomalies if a.get("resource") == resource and a["type"] == kind), None)
+
+
+def simulate_resources(spec: Spec, sim: Simulation) -> dict[str, ResourceSeries]:
+    """Часовой расход газа (м³), тепла (Гкал) и воды (м³). Топливо часового учёта не имеет."""
+    work_hours = _work_hours(sim)
+    heating_days = _heating_days(sim)
+    leak_from = len(sim.hours)
+    result: dict[str, ResourceSeries] = {}
+    for index, resource in enumerate(("gas", "heat", "water")):
+        r = spec.resources.get(resource)
+        if r is None:
+            continue
+        rng = random.Random(spec.seed + 10 + index)
+        no_setback = _resource_anomaly(spec, resource, "heating_no_setback")
+        leak = _resource_anomaly(spec, resource, "water_leak")
+        if leak:
+            leak_from = len(sim.hours) - 24 * int(leak.get("days", 21))
+        peak = float(r.get("heating_peak_gcal_h" if resource == "heat" else "heating_peak_m3_h", 0) or 0)
+        per_unit = float(r.get("process_m3_per_unit", 0) or 0)
+        domestic = float(r.get("domestic_m3_per_work_day", 0) or 0)
+        hourly: list[float] = []
+        baseline: list[float] = []
+        for i, hour in enumerate(sim.hours):
+            day = hour.ts.date()
+            share = 1 / work_hours[day] if hour.is_work and work_hours[day] else 0.0
+            flow = per_unit * sim.production[day] * share + domestic * share
+            heat = peak * _heating(hour.t_out) if day in heating_days else 0.0
+            if resource == "water":
+                flow += WATER_NIGHT_BASE_M3_H
+            noise = 1 + rng.gauss(0, 0.04)
+            clean = (flow + heat * (1.0 if hour.is_work else HEATING_SETBACK)) * noise
+            value = (flow + heat * (1.0 if hour.is_work or no_setback else HEATING_SETBACK)) * noise
+            if leak and i >= leak_from:
+                value += float(leak.get("lph", 100)) / 1000
+            digits = 4 if resource == "heat" else 3
+            hourly.append(round(max(0.0, value), digits))
+            baseline.append(round(max(0.0, clean), digits))
+        result[resource] = ResourceSeries(hourly, baseline)
+    return result
+
+
+def resource_bills(spec: Spec, sim: Simulation, series: dict[str, ResourceSeries]) -> dict[str, list[ResourceBill]]:
+    """Месячные счета по ресурсам: объём — сумма часов месяца, тариф индексируется 1 июля."""
+    result: dict[str, list[ResourceBill]] = {}
+    months = sorted({(h.ts.year, h.ts.month) for h in sim.hours})
+    for resource, r in spec.resources.items():
+        rows: list[ResourceBill] = []
+        for year, month in months:
+            factor = 1.0 if _indexed(spec, year, month) else 0.91
+            if resource == "liquid_fuel":
+                volume = _fuel_month(spec, sim, year, month)
+                tariff = float(r["price_rub_per_l"]) * (1 + 0.02 * math.sin(month * 1.7))  # цена свободная
+                rows.append(ResourceBill(resource, year, month, volume, round(tariff, 2), _vat(year)))
+                continue
+            volume = sum(v for h, v in zip(sim.hours, series[resource].hourly, strict=True)
+                         if (h.ts.year, h.ts.month) == (year, month))
+            key = {"gas": "tariff_rub_per_1000m3", "heat": "tariff_rub_per_gcal", "water": "tariff_rub_per_m3"}
+            bill = ResourceBill(resource, year, month, round(volume, 3 if resource == "heat" else 0),
+                                round(float(r[key[resource]]) * factor, 2), _vat(year))
+            if resource == "water":
+                bill.wastewater = round(volume * float(r.get("wastewater_share", 0.95)))
+                bill.wastewater_tariff = round(float(r["wastewater_tariff_rub_per_m3"]) * factor, 2)
+            rows.append(bill)
+        result[resource] = rows
+    return result
+
+
+def _fuel_month(spec: Spec, sim: Simulation, year: int, month: int) -> float:
+    """Литры топлива за месяц: норма на рабочие сутки × рабочие сутки, с разбросом заправок."""
+    rng = random.Random(spec.seed + 20 + year * 12 + month)
+    days = sum(1 for day, out in sim.production.items() if (day.year, day.month) == (year, month) and out)
+    return float(round(float(spec.resources["liquid_fuel"]["l_per_work_day"]) * days * (1 + rng.gauss(0, 0.06)), -1))
+
+
 # --- Документы ------------------------------------------------------------------------------------
 
 
@@ -549,6 +752,8 @@ def write_inventory(spec: Spec, path: Path) -> None:
         if not e.in_inventory:
             continue
         ws.append([e.name, e.model, e.count, e.rated_kw, e.location])
+    for meter in resource_meters(spec):
+        ws.append([meter["node"], meter["model"], 1, None, meter["location"]])
     _fit_columns(ws, (38, 26, 14, 18, 28), numeric="CD")
     wb.save(path)
 
@@ -623,7 +828,12 @@ def _bill_lines(spec: Spec, bill: Bill, number: int) -> tuple[list[str], list[st
 
 
 def write_bill(spec: Spec, bill: Bill, number: int, path_pdf: Path, font: str | None) -> Path:
-    head, header, rows, total = _bill_lines(spec, bill, number)
+    return _write_payment_document(*_bill_lines(spec, bill, number), path_pdf, font)
+
+
+def _write_payment_document(head: list[str], header: list[str], rows: list[list[str]], total: str,
+                            path_pdf: Path, font: str | None) -> Path:
+    """Счёт или накладная: шапка (первая и третья строки крупно), таблица, итог. Без шрифта — DOCX."""
     if font is None:
         path = path_pdf.with_suffix(".docx")
         d = _docx()
@@ -649,6 +859,88 @@ def write_bill(spec: Spec, bill: Bill, number: int, path_pdf: Path, font: str | 
     story += [table, Spacer(1, 10), Paragraph(total, style)]
     SimpleDocTemplate(str(path_pdf), pagesize=landscape(A4)).build(story)
     return path_pdf
+
+
+def _period(year: int, month: int) -> str:
+    last = calendar.monthrange(year, month)[1]
+    return f"{MONTHS[month - 1]} {year} (01.{month:02d}.{year}–{last}.{month:02d}.{year})"
+
+
+def _issued(year: int, month: int, delay: int) -> date:
+    return date(year, month, calendar.monthrange(year, month)[1]) + timedelta(days=delay)
+
+
+def resource_bill_lines(
+    spec: Spec, bill: ResourceBill, number: int
+) -> tuple[list[str], list[str], list[list[str]], str]:
+    """Шапка, таблица и итог счёта по ресурсу. Слова в шапке — те, по которым агент узнаёт тип документа:
+    «договор поставки газа», «водоотведение», «тепловая энергия, Гкал», «УПД» + «дизельное топливо»."""
+    r, o = spec.resources[bill.resource], spec.obj
+    buyer = f"{o['company']}, {o['address']}"
+    vat_line = f"Всего к оплате: {_fmt(bill.gross, 2)} руб., в т. ч. НДС {int(bill.vat * 100)} %"
+    if bill.resource == "gas":
+        head = [r["supplier"], "Поставщик природного газа",
+                f"Счёт № {number}/Г от {_issued(bill.year, bill.month, 5):%d.%m.%Y}",
+                f"Расчётный период: {_period(bill.year, bill.month)}",
+                f"Договор поставки газа № {r['contract_number']}", f"Покупатель: {buyer}"]
+        header = ["Наименование", "Объём газа, тыс. м³", "Тариф без НДС, руб./тыс. м³", "Сумма без НДС, руб.",
+                  "Сумма с НДС, руб."]
+        rows = [["Газ природный", _fmt(bill.volume / 1000, 3), _fmt(bill.tariff, 2), _fmt(bill.net, 2),
+                 _fmt(bill.gross, 2)]]
+        return head, header, rows, vat_line
+    if bill.resource == "heat":
+        head = [r["supplier"], "Теплоснабжающая организация",
+                f"Счёт № {number}-Т от {_issued(bill.year, bill.month, 7):%d.%m.%Y}",
+                f"Расчётный период: {_period(bill.year, bill.month)}",
+                f"Договор теплоснабжения № {r['contract_number']}", f"Потребитель: {buyer}"]
+        header = ["Наименование услуги", "Ед. изм.", "Количество", "Тариф без НДС, руб./Гкал",
+                  "Сумма без НДС, руб."]
+        rows = [["Тепловая энергия на отопление", "Гкал", _fmt(bill.volume, 3), _fmt(bill.tariff, 2),
+                 _fmt(bill.net, 2)]]
+        return head, header, rows, vat_line
+    if bill.resource == "water":
+        head = [r["supplier"], "Организация водопроводно-канализационного хозяйства",
+                f"Счёт № {number} от {_issued(bill.year, bill.month, 3):%d.%m.%Y}",
+                f"Расчётный период: {_period(bill.year, bill.month)}",
+                f"Договор холодного водоснабжения и водоотведения № {r['contract_number']}", f"Абонент: {buyer}"]
+        header = ["№", "Наименование услуги", "Ед. изм.", "Количество", "Тариф без НДС, руб.", "Сумма без НДС, руб."]
+        rows = [["1", "Холодное водоснабжение", "м³", _fmt(bill.volume), _fmt(bill.tariff, 2),
+                 _fmt(round(bill.volume * bill.tariff, 2), 2)],
+                ["2", "Водоотведение", "м³", _fmt(bill.wastewater), _fmt(bill.wastewater_tariff, 2),
+                 _fmt(round(bill.wastewater * bill.wastewater_tariff, 2), 2)]]
+        return head, header, rows, vat_line
+    title = FUEL_KINDS[r.get("fuel_kind", "diesel")][0]
+    net = bill.net
+    head = [r["supplier"], "Продавец нефтепродуктов",
+            f"Универсальный передаточный документ (УПД) № {number} от {_issued(bill.year, bill.month, 0):%d.%m.%Y}",
+            # Название топлива — в шапке: в ячейке таблицы оно переносится по строкам, и в текстовом слое PDF
+            # «топливо» и «дизельное» разъезжаются — признак накладной на топливо не срабатывает.
+            f"Отгрузка: {FUEL_KINDS[r.get('fuel_kind', 'diesel')][3]} за {MONTHS[bill.month - 1]} {bill.year}, "
+            "статус 1 (счёт-фактура и передаточный документ)",
+            f"Продавец: {r['supplier']}", f"Покупатель: {buyer}"]
+    header = ["Наименование товара", "Ед. изм.", "Количество", "Цена без НДС, руб./л", "Стоимость без НДС, руб.",
+              f"НДС {int(bill.vat * 100)} %, руб.", "Стоимость с НДС, руб."]
+    rows = [[title, "л", _fmt(bill.volume), _fmt(bill.tariff, 2), _fmt(net, 2), _fmt(bill.gross - net, 2),
+             _fmt(bill.gross, 2)]]
+    return head, header, rows, vat_line
+
+
+#: Папка и имя файла счетов ресурса в `upload/`.
+RESOURCE_FILES = {"gas": ("счета_газ", "Счёт_газ"), "heat": ("счета_тепло", "Счёт_тепло"),
+                  "water": ("счета_вода", "Счёт_вода"), "liquid_fuel": ("топливо", "УПД_топливо")}
+
+
+def write_resource_bills(spec: Spec, bills_: dict[str, list[ResourceBill]], upload: Path,
+                         font: str | None) -> list[Path]:
+    files: list[Path] = []
+    for index, (resource, rows) in enumerate(bills_.items()):
+        folder, stem = RESOURCE_FILES[resource]
+        (upload / folder).mkdir(parents=True, exist_ok=True)
+        for i, bill in enumerate(rows, start=1):
+            path = upload / folder / f"{stem}_{bill.year}-{bill.month:02d}.pdf"
+            number = 700 + index * 300 + i * 11
+            files.append(_write_payment_document(*resource_bill_lines(spec, bill, number), path, font))
+    return files
 
 
 def write_production_year(spec: Spec, sim: Simulation, path: Path) -> None:
@@ -708,6 +1000,46 @@ _ANOMALY_LINES = {
 }
 
 
+_RESOURCE_ANOMALY_LINES = {
+    "water_leak": "По ночам на вводе слышно, как вода идёт, хотя никто не работает — где-то подтекает.",
+    "heating_no_setback": "{place}: автоматики нет, ночью и в выходные топим так же, как в смену.",
+}
+
+
+def resource_call_lines(spec: Spec) -> list[tuple[str, str]]:
+    """Реплики о газе, тепле, воде и топливе: кто поставляет, на что идёт, где учёт, что не так."""
+    if not spec.resources:
+        return []
+    lines: list[tuple[str, str]] = [("Энергетик", "А кроме электричества что покупаем и на что оно идёт?")]
+    r = spec.resources
+    if "gas" in r:
+        uses = [u for u, on in (("на горелки, на технологию", r["gas"].get("process_m3_per_unit")),
+                                ("на котельную, на отопление", r["gas"].get("heating_peak_m3_h"))) if on]
+        lines.append(("Технолог", f"Газ берём у {r['gas']['supplier']}, идёт {' и '.join(uses)}."))
+    if "heat" in r:
+        lines.append(("Технолог", f"Отопление от городской сети, {r['heat']['supplier']}, тепло приходит в ИТП."))
+    if "water" in r:
+        lines.append(("Технолог", f"Вода и канализация — {r['water']['supplier']}, вода в основном на мойку "
+                                  "и на бытовые нужды."))
+    if "liquid_fuel" in r:
+        use = r["liquid_fuel"].get("use", "погрузчики")
+        fuel = "Мазут" if r["liquid_fuel"].get("fuel_kind") == "fuel_oil" else "Дизель"
+        lines.append(("Технолог", f"{fuel} покупаем у {r['liquid_fuel']['supplier']} на {use}, "
+                                  "по накладным каждый месяц."))
+    meters = resource_meters(spec)
+    if meters:
+        names = ", ".join(f"{_lower(m['node'])} ({m['model']})" for m in meters)
+        lines.append(("Технолог", f"Приборы на вводах есть: {names}; почасовые выгрузки отдадим файлами."))
+    for anomaly in spec.anomalies:
+        if "resource" not in anomaly:
+            continue
+        place = "ИТП" if anomaly["resource"] == "heat" else "Котельная"
+        template = anomaly.get("hint") or _RESOURCE_ANOMALY_LINES[anomaly["type"]]
+        lines.append(("Технолог", template.format(place=place)))
+        lines.append(("Энергетик", "Понял, посмотрим по счётчику на вводе."))
+    return lines
+
+
 def _lower(name: str) -> str:
     return name[:1].lower() + name[1:]
 
@@ -746,10 +1078,13 @@ def write_call_transcript(spec: Spec, path: Path) -> None:
         lines += [("Технолог", link_line(link, by_key, spec.product)) for link in spec.links]
         lines.append(("Энергетик", "Понял, так и свяжем в модели."))
     for anomaly in spec.anomalies:
+        if "resource" in anomaly:
+            continue
         e = by_key[anomaly["equipment"]]
         template = anomaly.get("hint") or _ANOMALY_LINES[anomaly["type"]]
         lines.append(("Технолог", template.format(name=e.name, unit=anomaly.get("unit", 1))))
         lines.append(("Энергетик", "Понял, отмечу, проверим по приборам."))
+    lines += resource_call_lines(spec)
     for e in spec.equipment:
         if not e.in_inventory:
             lines.append(("Технолог", f"Ещё есть {e.name.lower()}, {_fmt(e.rated_kw)} кВт, {e.count} шт. — "
@@ -765,7 +1100,54 @@ def write_call_transcript(spec: Spec, path: Path) -> None:
     d.save(path)
 
 
-def write_telemetry(spec: Spec, sim: Simulation, folder: Path) -> list[dict[str, Any]]:
+#: Узел ввода ресурса в ведомости — название из синонимов класса `input_meter.<ресурс>` каталога, прибор,
+#: имя прибора в файле показаний (агент привязывает его к вводу своего ресурса по слову `gas`/`heat`/`water`
+#: из ключа узла) и подпись колонки показания, по которой разбор узнаёт ресурс.
+METER_NODES = {
+    "gas": ("Узел учёта газа", "gas-vvod-1", "Показание счётчика газа, м³", "ГРПШ у корпуса"),
+    "heat": ("Узел учёта тепла (ИТП)", "heat-vvod-1", "Показание счётчика тепла, Гкал", "Тепловой пункт"),
+    "water": ("Водомер на вводе", "water-vvod-1", "Показание счётчика воды, м³", "Водомерный узел"),
+}
+METER_FILES = {"gas": "показания_приборов_учёта_газ.csv", "heat": "показания_приборов_учёта_тепло.csv",
+               "water": "показания_приборов_учёта_вода.csv"}
+
+
+def resource_meters(spec: Spec) -> list[dict[str, str]]:
+    """Приборы учёта на вводах ресурсов: только у ресурсов с полем `meter` (марка прибора)."""
+    meters = []
+    for resource, (node, device, column, location) in METER_NODES.items():
+        r = spec.resources.get(resource)
+        if r and r.get("meter"):
+            meters.append({"resource": resource, "node": node, "device": device, "column": column,
+                           "model": r["meter"], "location": r.get("meter_location", location)})
+    return meters
+
+
+def write_resource_telemetry(spec: Spec, sim: Simulation, series: dict[str, ResourceSeries],
+                             folder: Path) -> list[dict[str, str]]:
+    """Почасовые показания счётчиков газа, тепла и воды нарастающим итогом, по файлу на ресурс.
+
+    Отдельный файл — как отдельная выгрузка корректора, тепловычислителя или водомера. Показание — итог
+    с начала года счетов: он растёт и на часах до окна выгрузки, поэтому файл начинается не с нуля."""
+    folder.mkdir(parents=True, exist_ok=True)
+    first = len(sim.hours) - 24 * spec.telemetry_days
+    meters = resource_meters(spec)
+    for meter in meters:
+        hourly = series[meter["resource"]].hourly
+        digits = 4 if meter["resource"] == "heat" else 3
+        rng = random.Random(spec.seed + 30 + len(meter["device"]))
+        total = rng.uniform(1_000, 9_000) + sum(hourly[:first])
+        with (folder / METER_FILES[meter["resource"]]).open("w", encoding="utf-8", newline="") as fh:
+            writer = csv.writer(fh, delimiter=";")
+            writer.writerow(["Прибор учёта", "Дата и время", meter["column"]])
+            for i in range(first, len(sim.hours)):
+                total += hourly[i]
+                writer.writerow([meter["device"], sim.hours[i].ts.strftime("%d.%m.%Y %H:%M"), _fmt(total, digits)])
+    return meters
+
+
+def write_telemetry(spec: Spec, sim: Simulation, folder: Path,
+                    meters: list[dict[str, str]] | None = None) -> list[dict[str, Any]]:
     """Почасовые показания приборов учёта за последние `telemetry_days` суток + перечень приборов."""
     folder.mkdir(parents=True, exist_ok=True)
     first = len(sim.hours) - 24 * spec.telemetry_days
@@ -808,6 +1190,8 @@ def write_telemetry(spec: Spec, sim: Simulation, folder: Path) -> list[dict[str,
     by_key = {e.key: e for e in spec.equipment}
     for device in devices:
         ws.append([device["device"], "Меркурий 230", device["title"], by_key[device["equipment"]].location])
+    for meter in meters or []:
+        ws.append([meter["device"], meter["model"], meter["node"], meter["location"]])
     ws.append(["street-t1", "Датчик температуры", "Наружный воздух", "Северная стена"])
     _fit_columns(ws, (24, 22, max(24, *(len(d["title"]) + 4 for d in devices)), 24))
     wb.save(folder / "перечень_приборов_учёта.xlsx")
@@ -819,16 +1203,95 @@ LINK_METHOD_TITLES = {"regression": "от выпуска", "window": "в окн�
                       "window_const": "в окне, постоянная нагрузка"}
 
 
+def _resource_rub(spec: Spec, resource: str, volume: float) -> float:
+    """Рубли без НДС за объём ресурса по текущему тарифу; у воды — вместе с водоотведением."""
+    r = spec.resources[resource]
+    if resource == "gas":
+        return volume / 1000 * float(r["tariff_rub_per_1000m3"])
+    if resource == "heat":
+        return volume * float(r["tariff_rub_per_gcal"])
+    return volume * (float(r["tariff_rub_per_m3"]) + float(r["wastewater_tariff_rub_per_m3"]))
+
+
+def _co2(spec: Spec, resource: str, volume: float) -> str:
+    if resource == "gas":
+        return _fmt(volume / 1000 * GAS_CO2_T_PER_1000M3, 1)
+    if resource == "liquid_fuel":
+        _, density, factor, _ = FUEL_KINDS[spec.resources[resource].get("fuel_kind", "diesel")]
+        return _fmt(volume * density / 1000 * factor, 1)
+    return "—"
+
+
+def resource_answers(spec: Spec, sim: Simulation, series: dict[str, ResourceSeries],
+                     rbills: dict[str, list[ResourceBill]]) -> tuple[list[str], list[dict[str, Any]]]:
+    """Раздел «Покупные ресурсы» ответов: итоги по счетам, приборы на вводах, заложенные потери."""
+    if not rbills:
+        return [], []
+    units = {"gas": "м³", "heat": "Гкал", "water": "м³", "liquid_fuel": "л"}
+    tariff_units = {"gas": "₽/тыс. м³", "heat": "₽/Гкал", "water": "₽/м³", "liquid_fuel": "₽/л"}
+    lines = ["", "## Покупные ресурсы", "",
+             "Счета лежат в `upload/` по папкам ресурсов. Агент раскладывает их по своим рядам; ни одна строка "
+             "не должна попасть в электроэнергию.", "",
+             "| Ресурс | Объём за период | ₽ без НДС | Последний тариф без НДС | CO₂, т |", "|---|---:|---:|---:|---:|"]
+    for resource, rows in rbills.items():
+        digits = 3 if resource == "heat" else 0
+        volume = sum(b.volume for b in rows)
+        # У воды водоотведение — отдельной строкой ниже, здесь только холодная вода.
+        rub = sum(round(b.volume * b.tariff, 2) for b in rows) if resource == "water" else sum(b.net for b in rows)
+        lines.append(f"| {RESOURCE_TITLES[resource][0]} | {_fmt(volume, digits)} {units[resource]} | {_fmt(rub)} "
+                     f"| {_fmt(rows[-1].tariff, 2)} {tariff_units[resource]} | {_co2(spec, resource, volume)} |")
+        if resource == "water":
+            lines.append(f"| Водоотведение | {_fmt(sum(b.wastewater for b in rows))} м³ "
+                         f"| {_fmt(sum(round(b.wastewater * b.wastewater_tariff, 2) for b in rows))} "
+                         f"| {_fmt(rows[-1].wastewater_tariff, 2)} ₽/м³ | — |")
+    meters = resource_meters(spec)
+    if meters:
+        lines += ["", "Приборы на вводах (почасовые показания за последние "
+                  f"{spec.telemetry_days} суток в `telemetry/`): "
+                  + "; ".join(f"{m['device']} → «{m['node']}», `{METER_FILES[m['resource']]}`" for m in meters)
+                  + ". Агент привязывает прибор к вводу своего ресурса; электрические расчёты от этого не меняются."]
+    findings: list[dict[str, Any]] = []
+    for anomaly in spec.anomalies:
+        resource = anomaly.get("resource")
+        if resource is None:
+            continue
+        if anomaly["type"] == "water_leak":
+            yearly = float(anomaly.get("lph", 100)) / 1000 * 8760
+            title = anomaly.get("title") or f"Утечка воды {_fmt(float(anomaly.get('lph', 100)))} л/ч"
+            how = (f"последние {anomaly.get('days', 21)} суток ночной минимум расхода на вводе выше порога: "
+                   "детектор ночной утечки поднимает инцидент с рублями по воде и водоотведению")
+        else:
+            delta = sum(series[resource].hourly) - sum(series[resource].baseline)
+            yearly = delta * 8760 / len(sim.hours)
+            title = anomaly.get("title") or f"{RESOURCE_TITLES[resource][0]}: отопление без ночного снижения"
+            how = ("видно на часовом графике ввода и в преаудите по счетам; детекторы режима работы смотрят только "
+                   "на электроэнергию, поэтому инцидента нет — спросите помощника")
+        findings.append({"title": title, "type": anomaly["type"], "resource": resource, "unit": units[resource],
+                         "volume_per_year": round(yearly, 1),
+                         "rub_per_year": round(_resource_rub(spec, resource, yearly)),
+                         "how_found": how})
+    if findings:
+        lines += ["", "### Заложенные потери по ресурсам", "", "| Что | Объём в год | ₽ в год (без НДС) | Как найти |",
+                  "|---|---:|---:|---|",
+                  *[f"| {f['title']} | {_fmt(f['volume_per_year'], 1 if f['unit'] == 'Гкал' else 0)} {f['unit']} "
+                    f"| {_fmt(f['rub_per_year'])} | {f['how_found']} |" for f in findings]]
+    return lines, findings
+
+
 def _link_end(key: str, by_key: dict[str, Equipment]) -> str:
     return "Выпуск продукции" if key == OUTPUT else by_key[key].name
 
 
-def write_answers(spec: Spec, sim: Simulation, bills_: list[Bill], path: Path) -> list[dict[str, Any]]:
+def write_answers(spec: Spec, sim: Simulation, bills_: list[Bill], path: Path,
+                  series: dict[str, ResourceSeries] | None = None,
+                  rbills: dict[str, list[ResourceBill]] | None = None) -> list[dict[str, Any]]:
     tariff = float(spec.supply["tariff_rub_per_kwh"])
     by_key = {e.key: e for e in spec.equipment}
     hours = len(sim.hours)
     findings = []
     for anomaly in spec.anomalies:
+        if "resource" in anomaly:
+            continue
         e = by_key[anomaly["equipment"]]
         title = anomaly.get("title") or {
             "off_shift": f"{e.name} работает вне смены",
@@ -866,6 +1329,9 @@ def write_answers(spec: Spec, sim: Simulation, bills_: list[Bill], path: Path) -
                   "| Откуда | Куда | Вид | Метод |", "|---|---|---|---|",
                   *[f"| {_link_end(link.source, by_key)} | {by_key[link.target].name} | {LINK_KIND_TITLES[link.kind]} "
                     f"| {LINK_METHOD_TITLES.get(link.method or '', '—')} |" for link in spec.links]]
+    resource_lines, resource_findings = resource_answers(spec, sim, series or {}, rbills or {})
+    lines += resource_lines
+    findings += resource_findings
     hidden = [e for e in spec.equipment if not e.in_inventory]
     if hidden:
         lines += ["", "## Не внесено в ведомость", "",
@@ -895,6 +1361,30 @@ HOW_TO = """# Как загрузить пакет в Полиметрику
 
 `ЧТО ЗАЛОЖЕНО.md` — ответы: какие потери спрятаны в данных. Откройте после того, как посмотрите анализ.
 """
+
+
+def resource_how_to(spec: Spec) -> str:
+    """Шаги загрузки счетов и показаний газа, тепла, воды и топлива — только для описанных ресурсов."""
+    if not spec.resources:
+        return ""
+    folders = ", ".join(f"`upload/{RESOURCE_FILES[r][0]}/`" for r in spec.resources)
+    text = f"""
+## Газ, тепло, вода и топливо
+
+6. Счета по другим ресурсам лежат в {folders}.
+   Если не приложили их на шаге 2, приложите вторым сообщением и напишите «Вот счета за газ, тепло, воду
+   и топливо». Подтвердите карточки «Документы» и «Ряды по счетам»:
+   у каждого ресурса свои ряды, тариф и удельный расход, в обзоре появится переключатель ресурса и «Всего, ₽».
+"""
+    meters = resource_meters(spec)
+    if meters:
+        files = ", ".join(f"`telemetry/{METER_FILES[m['resource']]}`" for m in meters)
+        text += f"""7. Показания счётчиков на вводах: {files}.
+   Каждый файл — отдельным сообщением с текстом «Загрузи показания приборов учёта из файла».
+   Прибор привяжется к узлу ввода своего ресурса из ведомости («{meters[0]['node']}» и др.).
+   Проверить: «Сколько м³ газа (Гкал, м³ воды) ушло на вводе за последнюю неделю по суткам?»
+"""
+    return text
 
 
 def pack_upload(upload: Path, target: Path) -> Path:
@@ -937,9 +1427,14 @@ def build(spec: Spec, out: Path) -> dict[str, Any]:
     files.append(upload / "07_Разговор_с_технологом.docx")
     write_call_transcript(spec, files[-1])
 
-    devices = write_telemetry(spec, sim, out / "telemetry")
-    findings = write_answers(spec, sim, bills_, out / "ЧТО ЗАЛОЖЕНО.md")
-    (out / "КАК ЗАГРУЗИТЬ.md").write_text(HOW_TO, encoding="utf-8")
+    flows = simulate_resources(spec, sim)
+    rbills = resource_bills(spec, sim, flows)
+    files += write_resource_bills(spec, rbills, upload, font)
+
+    meters = write_resource_telemetry(spec, sim, flows, out / "telemetry")
+    devices = write_telemetry(spec, sim, out / "telemetry", meters)
+    findings = write_answers(spec, sim, bills_, out / "ЧТО ЗАЛОЖЕНО.md", flows, rbills)
+    (out / "КАК ЗАГРУЗИТЬ.md").write_text(HOW_TO + resource_how_to(spec), encoding="utf-8")
 
     by_equipment: dict[str, float] = {}
     for key, series in sim.units.items():
@@ -954,6 +1449,14 @@ def build(spec: Spec, out: Path) -> dict[str, Any]:
         "production_total": round(sum(sim.production.values())),
         "findings": findings,
         "devices": devices,
+        "resources": {
+            resource: {"unit": RESOURCE_TITLES[resource][1],
+                       "bills": [{"month": f"{b.year}-{b.month:02d}", "volume": b.volume, "gross_rub": b.gross,
+                                  **({"wastewater_m3": b.wastewater} if resource == "water" else {})}
+                                 for b in rows]}
+            for resource, rows in rbills.items()
+        },
+        "resource_meters": meters,
         "pdf_font": font is not None,
         "upload_files": [str(p.relative_to(out)) for p in files],
         "upload_zip": str(pack_upload(upload, out.with_name(f"{out.name}-upload.zip"))),
@@ -973,8 +1476,9 @@ def main() -> int:
         print(f"Ошибка спецификации: {exc}", file=sys.stderr)
         return 2
     summary = build(spec, args.out)
-    print(json.dumps({k: summary[k] for k in ("object", "period", "total_kwh", "production_total",
+    print(json.dumps({**{k: summary[k] for k in ("object", "period", "total_kwh", "production_total",
                                                 "findings", "pdf_font", "upload_files", "upload_zip")},
+                     "resources": {k: len(v["bills"]) for k, v in summary["resources"].items()}},
                      ensure_ascii=False, indent=2))
     return 0
 

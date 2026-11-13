@@ -44,6 +44,11 @@
     {"type": "unit_overconsumption", "equipment": "bitumen_heater", "unit": 3, "extra": 0.35, "title": "Обогрев ёмкости №3 потребляет на 35 % больше остальных (повреждена теплоизоляция)", "hint": "На ёмкости №3 летом меняли люк, кожух потом толком не восстановили."},
     {"type": "drift", "equipment": "exhaust", "unit": 1, "extra": 0.2, "title": "Дымосос: растёт потребление (забиваются рукава фильтра)", "hint": "Рукава в фильтре не меняли с прошлого сезона, перепад давления по прибору ползёт вверх."}
   ],
+  "resources": {
+    "gas": {"supplier": "ООО «Северский газ»", "contract_number": "Г-118/26", "tariff_rub_per_1000m3": 9150, "process_m3_per_unit": 7.5, "meter": "Ирвис-РС4", "meter_location": "ГРПШ горелки сушильного барабана"},
+    "water": {"supplier": "МУП «Водоресурс»", "contract_number": "В-0563", "tariff_rub_per_m3": 49.8, "wastewater_tariff_rub_per_m3": 38.6, "domestic_m3_per_work_day": 3.0, "wastewater_share": 0.9},
+    "liquid_fuel": {"supplier": "ООО «Юг-Нефтепродукт»", "fuel_kind": "diesel", "price_rub_per_l": 61.5, "l_per_work_day": 280, "use": "фронтальные погрузчики"}
+  },
   "links": [
     {"from": "output", "to": "dryer_drum", "kind": "metric", "method": "regression"},
     {"from": "dryer_drum", "to": "mixer", "kind": "process"},
