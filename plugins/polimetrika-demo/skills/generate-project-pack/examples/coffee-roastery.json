@@ -43,7 +43,7 @@
     {"type": "heating_no_setback", "resource": "heat", "title": "ИТП без ночного и выходного снижения отопления"}
   ],
   "resources": {
-    "gas": {"supplier": "ООО «Газресурс-Поволжье»", "contract_number": "45-Т/26", "tariff_rub_per_1000m3": 8412.5, "process_m3_per_unit": 0.055, "meter": "Ирвис-РС4", "meter_location": "ГРПШ у корпуса 3"},
+    "gas": {"supplier": "ООО «Газресурс-Поволжье»", "contract_number": "45-Т/26", "tariff_rub_per_1000m3": 8412.5, "process_m3_per_unit": 0.055, "meter": "СГ-16МТ-160", "meter_location": "ГРПШ у корпуса 3"},
     "heat": {"supplier": "АО «Теплосеть Заводского района»", "contract_number": "Т-2291", "tariff_rub_per_gcal": 2480, "heating_peak_gcal_h": 0.11, "meter": "ВКТ-7", "meter_location": "ИТП корпуса 3"},
     "water": {"supplier": "МП «Городской водоканал»", "contract_number": "7712", "tariff_rub_per_m3": 58.32, "wastewater_tariff_rub_per_m3": 45.1, "process_m3_per_unit": 0.002, "domestic_m3_per_work_day": 2.5, "wastewater_share": 0.95, "meter": "ВСХНд-40"}
   },

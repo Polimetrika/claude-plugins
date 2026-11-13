@@ -30,6 +30,7 @@ import csv
 import json
 import math
 import random
+import re
 import shutil
 import sys
 import zipfile
@@ -209,6 +210,11 @@ _RESOURCE_FIELDS = {
 }
 
 
+#: Слова, по которым агент узнаёт суточный архив корректора газа (сильный признак типа документа). В марке
+#: прибора они уводят ведомость оборудования из инвентаризации: разрыв баллов падает, тип решает модель.
+METER_ARCHIVE_WORDS = re.compile(r"ирвис|корректор|архив")
+
+
 def _resources(raw: Any) -> dict[str, dict[str, Any]]:
     if raw is None:
         return {}
@@ -225,6 +231,10 @@ def _resources(raw: Any) -> dict[str, dict[str, Any]]:
     if gas and gas.get("heating_peak_m3_h") and "heat" in raw:
         raise SpecError("resources: отопление либо своей котельной на газе (gas.heating_peak_m3_h), "
                         "либо от сети (heat)")
+    for key, item in raw.items():
+        if METER_ARCHIVE_WORDS.search(str(item.get("meter", "")).lower()):
+            raise SpecError(f"resources.{key}.meter: марка без «Ирвис», «корректор», «архив» — по ним ведомость "
+                            "распознаётся как архив корректора газа; например «СГ-16МТ-160»")
     fuel = raw.get("liquid_fuel")
     if fuel and fuel.get("fuel_kind", "diesel") not in FUEL_KINDS:
         raise SpecError(f"resources.liquid_fuel.fuel_kind: одно из {sorted(FUEL_KINDS)}")
