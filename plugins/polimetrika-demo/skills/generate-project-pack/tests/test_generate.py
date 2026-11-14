@@ -129,7 +129,7 @@ def test_production_reports_are_split_by_area_titles(coffee) -> None:
     spec, _, out = coffee
     titles = {c["title"] for c in spec.raw["circuits"]}
     for name, first in (("05_Отчёт_о_выпуске_по_месяцам.xlsx", "Месяц"), ("06_Суточный_выпуск.xlsx", "Дата")):
-        (_, rows), = _xlsx(out / "upload" / name)
+        (_, rows), = _xlsx(out / "upload" / gen.PRODUCTION_LATER / name)
         assert rows[3] == [first, gen.AREA_COLUMN, f"{'Выпуск продукции' if first == 'Месяц' else 'Выпуск'}, кг"]
         data = rows[4:]
         assert {row[1] for row in data} == titles  # подписи — названия контуров дословно
@@ -138,14 +138,15 @@ def test_production_reports_are_split_by_area_titles(coffee) -> None:
 
 def test_daily_sums_match_monthly_report(coffee) -> None:
     spec, sim, out = coffee
-    monthly = {(row[0], row[1]): row[2] for row in _rows(out / "upload" / "05_Отчёт_о_выпуске_по_месяцам.xlsx")}
+    later = out / "upload" / gen.PRODUCTION_LATER
+    monthly = {(row[0], row[1]): row[2] for row in _rows(later / "05_Отчёт_о_выпуске_по_месяцам.xlsx")}
     sums: dict[tuple[str, str], float] = defaultdict(float)
     for area in spec.areas:
         for day, value in sim.outputs[area.key].items():
             sums[(f"{gen.MONTHS[day.month - 1]} {day.year}", area.title)] += value
     assert monthly
     assert all(sums[key] == value for key, value in monthly.items())
-    daily = _rows(out / "upload" / "06_Суточный_выпуск.xlsx")
+    daily = _rows(later / "06_Суточный_выпуск.xlsx")
     by_title = {area.title: area.key for area in spec.areas}
     last_month = sum(row[2] for row in daily)
     first = spec.end.replace(day=1)
@@ -259,7 +260,7 @@ def test_areas_with_different_units_get_own_sheets(tmp_path: Path) -> None:
     spec = _load(raw, tmp_path)
     out = tmp_path / "pack"
     gen.build(spec, out)
-    sheets = _xlsx(out / "upload" / "06_Суточный_выпуск.xlsx")
+    sheets = _xlsx(out / "upload" / gen.PRODUCTION_LATER / "06_Суточный_выпуск.xlsx")
     assert [title for title, _ in sheets] == ["Выпуск, т", "Выпуск, шт"]
     assert [rows[3][2] for _, rows in sheets] == ["Выпуск, т", "Выпуск, шт"]
     assert [{row[1] for row in rows[4:]} for _, rows in sheets] == [
@@ -279,3 +280,30 @@ def test_area_spec_errors(change, message: str, tmp_path: Path) -> None:
     change(raw)
     with pytest.raises(gen.SpecError, match=message):
         _load(raw, tmp_path)
+
+
+def test_production_goes_second_when_areas(coffee) -> None:
+    """Выпуск, разобранный раньше контуров модели, агент складывает в объект: при участках отчёты о выпуске
+    лежат отдельно и прикладываются вторым сообщением, после подтверждения модели."""
+    _, _, out = coffee
+    later = out / "upload" / gen.PRODUCTION_LATER
+    assert sorted(p.name for p in later.iterdir()) == ["05_Отчёт_о_выпуске_по_месяцам.xlsx", "06_Суточный_выпуск.xlsx"]
+    assert not list((out / "upload").glob("0[56]_*"))
+    text = (out / "КАК ЗАГРУЗИТЬ.md").read_text(encoding="utf-8")
+    first = text.index(f"КРОМЕ папки `upload/{gen.PRODUCTION_LATER}/`")
+    confirm = text.index("энергомодель с контурами «Обжарка», «Фасовка»")
+    second = text.index("«Вот отчёты о выпуске по участкам, разнеси выпуск по контурам»")
+    assert first < confirm < second
+    assert "«Поставь окна работы контуров по графикам участков из разговора с технологом»" in text
+    assert "ВСЕ файлы из папки `upload/` (можно одним сообщением)" not in text
+    steps = [int(line.split(".")[0]) for line in text.splitlines() if line[:1].isdigit()]
+    assert steps == list(range(1, len(steps) + 1))  # шаги по порядку, без пропусков и повторов
+
+
+def test_production_in_upload_without_areas(tmp_path: Path) -> None:
+    spec = _load(_raw("no-circuits.json"), tmp_path)
+    gen.build(spec, tmp_path / "pack")
+    assert (tmp_path / "pack" / "upload" / "05_Отчёт_о_выпуске_по_месяцам.xlsx").exists()
+    assert not (tmp_path / "pack" / "upload" / gen.PRODUCTION_LATER).exists()
+    text = (tmp_path / "pack" / "КАК ЗАГРУЗИТЬ.md").read_text(encoding="utf-8")
+    assert "ВСЕ файлы из папки `upload/` (можно одним сообщением)" in text
