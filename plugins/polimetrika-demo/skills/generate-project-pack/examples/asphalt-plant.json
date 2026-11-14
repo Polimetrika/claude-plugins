@@ -21,8 +21,10 @@
   },
   "product": {"title": "Асфальтобетонная смесь", "unit": "т", "daily_min": 600, "daily_max": 1150},
   "circuits": [
-    {"key": "drying", "title": "Сушка и нагрев каменных материалов", "driver_unit": "т"},
-    {"key": "mixing", "title": "Смешение и выдача смеси", "driver_unit": "т"}
+    {"key": "drying", "title": "Сушка и нагрев каменных материалов", "driver_unit": "т", "daily_min": 560, "daily_max": 1080,
+     "shifts": {"title": "2 смены, 06:00–22:00, пн–сб", "start_hour": 6, "end_hour": 22, "weekdays": [0, 1, 2, 3, 4, 5]}},
+    {"key": "mixing", "title": "Смешение и выдача смеси", "driver_unit": "т", "daily_min": 600, "daily_max": 1150,
+     "shifts": {"title": "2 смены, 07:00–23:00, пн–сб", "start_hour": 7, "end_hour": 23, "weekdays": [0, 1, 2, 3, 4, 5]}}
   ],
   "equipment": [
     {"key": "feeder", "name": "Агрегат питания (дозаторы холодных бункеров)", "model": "ДС-185 АП-6", "count": 6, "rated_kw": 5.5, "profile": "process", "load": 0.7, "idle": 0.0, "location": "Площадка инертных", "circuit": "drying", "metered": false},
@@ -45,7 +47,7 @@
     {"type": "drift", "equipment": "exhaust", "unit": 1, "extra": 0.2, "title": "Дымосос: растёт потребление (забиваются рукава фильтра)", "hint": "Рукава в фильтре не меняли с прошлого сезона, перепад давления по прибору ползёт вверх."}
   ],
   "resources": {
-    "gas": {"supplier": "ООО «Северский газ»", "contract_number": "Г-118/26", "tariff_rub_per_1000m3": 9150, "process_m3_per_unit": 7.5, "meter": "СГ-16МТ-160", "meter_location": "ГРПШ горелки сушильного барабана"},
+    "gas": {"supplier": "ООО «Северский газ»", "contract_number": "Г-118/26", "tariff_rub_per_1000m3": 9150, "process_m3_per_unit": 7.5, "circuit": "drying", "meter": "СГ-16МТ-160", "meter_location": "ГРПШ горелки сушильного барабана"},
     "water": {"supplier": "МУП «Водоресурс»", "contract_number": "В-0563", "tariff_rub_per_m3": 49.8, "wastewater_tariff_rub_per_m3": 38.6, "domestic_m3_per_work_day": 3.0, "wastewater_share": 0.9},
     "liquid_fuel": {"supplier": "ООО «Юг-Нефтепродукт»", "fuel_kind": "diesel", "price_rub_per_l": 61.5, "l_per_work_day": 280, "use": "фронтальные погрузчики"}
   },

@@ -91,6 +91,28 @@ class Spec:
     links: list[Link] = field(default_factory=list)
     #: Покупные ресурсы кроме электроэнергии: газ, тепло, вода, жидкое топливо (`references/spec.md`).
     resources: dict[str, dict[str, Any]] = field(default_factory=dict)
+    #: Участки со своим выпуском и графиком — только при двух контурах и больше (`areas_of`).
+    areas: list[Area] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class Area:
+    """Участок — контур энергомодели со своим выпуском и графиком работы.
+
+    Заводится только при двух контурах и больше: объект без контуров или с одним работает и выпускает
+    по `object.shifts` и `product`, как раньше. Без своих `daily_min`/`daily_max` выпуск участка — равная
+    доля выпуска объекта, без своих `shifts` — график объекта.
+    """
+
+    key: str
+    title: str
+    unit: str
+    low: float
+    high: float
+    #: `start_hour`, `end_hour`, `weekdays` (по умолчанию — рабочие дни объекта), `title`.
+    shifts: dict[str, Any]
+    #: Выпуск задан у контура; иначе — доля выпуска объекта.
+    own: bool
 
 
 @dataclass(frozen=True)
@@ -136,7 +158,7 @@ def load_spec(path: Path) -> Spec:
         _req(product, key, "product")
     if product["unit"] not in ("кг", "т", "шт"):
         raise SpecError("product.unit: только «кг», «т» или «шт»")
-    circuits = raw.get("circuits") or []
+    circuits = _circuits(raw.get("circuits") or [])
     circuit_keys = {c["key"] for c in circuits}
     equipment: list[Equipment] = []
     for i, item in enumerate(_req(raw, "equipment", "spec")):
@@ -167,6 +189,7 @@ def load_spec(path: Path) -> Spec:
     if len(keys) != len(set(keys)):
         raise SpecError("equipment: ключи должны быть уникальны")
     resources = _resources(raw.get("resources"))
+    _resource_circuits(resources, circuit_keys)
     anomalies = raw.get("anomalies") or []
     for i, anomaly in enumerate(anomalies):
         kind = anomaly.get("type")
@@ -182,7 +205,7 @@ def load_spec(path: Path) -> Spec:
     links = _links(raw.get("links"), equipment, circuits)
     period = raw.get("period") or {}
     end = date.fromisoformat(period["end"]) if period.get("end") else _last_full_month_end(date.today())
-    return Spec(
+    spec = Spec(
         raw=raw,
         seed=int(raw.get("seed", 1)),
         obj=obj,
@@ -199,6 +222,70 @@ def load_spec(path: Path) -> Spec:
         links=links,
         resources=resources,
     )
+    spec.areas = areas_of(spec)
+    return spec
+
+
+def _circuits(raw: Any) -> list[dict[str, Any]]:
+    """Контуры: ключ и название обязательны, свой выпуск и график — только при двух контурах и больше."""
+    if not isinstance(raw, list):
+        raise SpecError("circuits: ожидается список")
+    for i, circuit in enumerate(raw):
+        where = f"circuits[{i}]"
+        _req(circuit, "key", where)
+        _req(circuit, "title", where)
+        own = [name for name in ("daily_min", "daily_max", "shifts") if name in circuit]
+        if own and len(raw) < 2:
+            raise SpecError(f"{where}: свой выпуск и график — у двух контуров и больше; у единственного "
+                            "контура они — объекта (`product`, `object.shifts`)")
+        if ("daily_min" in circuit) != ("daily_max" in circuit):
+            raise SpecError(f"{where}: выпуск участка — оба поля, daily_min и daily_max")
+        if "daily_min" in circuit and not 0 < float(circuit["daily_min"]) <= float(circuit["daily_max"]):
+            raise SpecError(f"{where}: нужно 0 < daily_min ≤ daily_max")
+        if "shifts" in circuit:
+            for key in ("title", "start_hour", "end_hour"):
+                _req(circuit["shifts"], key, f"{where}.shifts")
+    names = [_area_name(c["title"]) for c in raw]
+    if len(names) != len(set(names)):
+        raise SpecError("circuits: названия контуров должны различаться — по ним Полиметрика разносит выпуск")
+    return raw
+
+
+def _area_name(text: str) -> str:
+    """Название так, как его сравнивает Полиметрика: только буквы и цифры, «ё» — «е»."""
+    return re.sub(r"[^a-zа-я0-9]+", "", str(text).lower().replace("ё", "е"))
+
+
+def _resource_circuits(resources: dict[str, dict[str, Any]], circuit_keys: set[str]) -> None:
+    for key, item in resources.items():
+        if "circuit" not in item:
+            continue
+        if key not in ("gas", "water"):
+            raise SpecError(f"resources.{key}.circuit: контур — только у газа и воды")
+        if item["circuit"] not in circuit_keys:
+            raise SpecError(f"resources.{key}.circuit: нет контура «{item['circuit']}»")
+
+
+def areas_of(spec: Spec) -> list[Area]:
+    """Участки объекта с двумя контурами и больше; у объекта без контуров или с одним — пусто."""
+    if len(spec.circuits) < 2:
+        return []
+    share = len(spec.circuits)
+    low, high = float(spec.product["daily_min"]), float(spec.product["daily_max"])
+    weekdays = sorted(_work_days(spec))
+    found = []
+    for c in spec.circuits:
+        own = "daily_min" in c
+        found.append(Area(
+            key=c["key"],
+            title=c["title"],
+            unit=c.get("driver_unit") or spec.product["unit"],
+            low=float(c["daily_min"]) if own else low / share,
+            high=float(c["daily_max"]) if own else high / share,
+            shifts={"weekdays": weekdays, **(c.get("shifts") or spec.obj["shifts"])},
+            own=own,
+        ))
+    return found
 
 
 #: Обязательные поля ресурса: поставщик, договор и тариф без НДС в единицах счёта.
@@ -330,6 +417,10 @@ class Simulation:
     production: dict[date, float]
     #: Та же мощность без заложенных аномалий — для оценки потерь в «ЧТО ЗАЛОЖЕНО.md».
     baseline: dict[str, list[float]] = field(default_factory=dict)
+    #: Выпуск участков по суткам (`Spec.areas`): ключ контура → сутки → выпуск в единице контура.
+    outputs: dict[str, dict[date, float]] = field(default_factory=dict)
+    #: Часы участков: признак работы по графику участка и загрузка по его выпуску; ключ — контур.
+    area_hours: dict[str, list[Hour]] = field(default_factory=dict)
 
 
 def _start(spec: Spec) -> date:
@@ -344,7 +435,10 @@ def _work_days(spec: Spec) -> set[int]:
 
 
 def _is_work_hour(spec: Spec, ts: datetime, workdays: set[int]) -> bool:
-    shifts = spec.obj["shifts"]
+    return _in_shift(spec.obj["shifts"], ts, workdays)
+
+
+def _in_shift(shifts: dict[str, Any], ts: datetime, workdays: set[int]) -> bool:
     start, end = int(shifts["start_hour"]), int(shifts["end_hour"])
     if ts.weekday() not in workdays:
         return False
@@ -402,10 +496,12 @@ def simulate(spec: Spec) -> Simulation:
     ts = datetime(start.year, start.month, start.day)
     stop = datetime(spec.end.year, spec.end.month, spec.end.day) + timedelta(days=1)
     while ts < stop:
-        output = production[ts.date()]
-        factor = (output - lo) / (hi - lo) if output and hi > lo else (1.0 if output else 0.0)
+        factor = _day_factor(production[ts.date()], lo, hi)
         hours.append(Hour(ts, _is_work_hour(spec, ts, workdays), _outdoor(spec, ts, rng), factor))
         ts += timedelta(hours=1)
+    # Участки — своими генераторами случайных чисел: общий ряд чисел, а с ним улица и общие системы, не сдвигается.
+    outputs = area_outputs(spec, production)
+    by_area = {area.key: area_hours(area, hours, outputs[area.key]) for area in spec.areas}
 
     drift_from = len(hours) - 24 * 7 * 8  # дрейф — последние 8 недель
     units: dict[str, list[float]] = {}
@@ -416,10 +512,12 @@ def simulate(spec: Spec) -> Simulation:
         no_setback = _anomaly(spec, e.key, "no_night_setback")
         over = _anomaly(spec, e.key, "unit_overconsumption")
         drift = _anomaly(spec, e.key, "drift")
+        # Оборудование участка работает по часам и выпуску участка, «вне смены» — вне окна участка.
+        own_hours = by_area.get(e.circuit or "", hours)
         for n in range(1, e.count + 1):
             series: list[float] = []
             clean: list[float] = []
-            for i, hour in enumerate(hours):
+            for i, hour in enumerate(own_hours):
                 fraction = _unit_fraction(e, hour, rng)
                 clean.append(round(e.rated_kw * fraction, 3))
                 noise = 1 + anomaly_rng.gauss(0, 0.05)
@@ -442,7 +540,37 @@ def simulate(spec: Spec) -> Simulation:
     for i, hour in enumerate(hours):
         total = sum(series[i] for series in units.values())
         other.append(round(base * (1 + rng.gauss(0, 0.1)) + total * 0.02, 3))  # база + потери в сети
-    return Simulation(hours, units, other, production, baseline)
+    return Simulation(hours, units, other, production, baseline, outputs=outputs, area_hours=by_area)
+
+
+def _day_factor(output: float, low: float, high: float) -> float:
+    """Загрузка суток по выпуску: 0 — минимум диапазона, 1 — максимум; без выпуска — 0."""
+    return (output - low) / (high - low) if output and high > low else (1.0 if output else 0.0)
+
+
+def area_outputs(spec: Spec, production: dict[date, float]) -> dict[str, dict[date, float]]:
+    """Суточный выпуск участков: свой диапазон в рабочие дни участка или равная доля выпуска объекта."""
+    found: dict[str, dict[date, float]] = {}
+    for index, area in enumerate(spec.areas):
+        rng = random.Random(spec.seed + 40 + index)
+        workdays = set(area.shifts["weekdays"])
+        days: dict[date, float] = {}
+        for day, total in production.items():
+            if day.weekday() not in workdays:
+                days[day] = 0.0
+            elif area.own:
+                days[day] = float(round(rng.uniform(area.low, area.high)))
+            else:
+                days[day] = float(round(total / len(spec.areas)))
+        found[area.key] = days
+    return found
+
+
+def area_hours(area: Area, hours: list[Hour], output: dict[date, float]) -> list[Hour]:
+    """Часы участка: работа — по его графику, загрузка — по его выпуску; улица общая."""
+    workdays = set(area.shifts["weekdays"])
+    return [Hour(h.ts, _in_shift(area.shifts, h.ts, workdays), h.t_out,
+                 _day_factor(output[h.ts.date()], area.low, area.high)) for h in hours]
 
 
 # --- Итоги по месяцам -----------------------------------------------------------------------------
@@ -560,11 +688,37 @@ def _heating_days(sim: Simulation) -> set[date]:
     return {day for day, values in temps.items() if sum(values) / len(values) < HEATING_SEASON_C}
 
 
-def _work_hours(sim: Simulation) -> dict[date, int]:
+def _work_hours(hours: list[Hour]) -> dict[date, int]:
     counts: dict[date, int] = {}
-    for hour in sim.hours:
+    for hour in hours:
         counts[hour.ts.date()] = counts.get(hour.ts.date(), 0) + (1 if hour.is_work else 0)
     return counts
+
+
+#: Выпуск, от которого идёт расход ресурса: суточный выпуск участка, его часы и число рабочих часов в сутках.
+Driver = tuple[dict[date, float], list[Hour], dict[date, int]]
+
+
+def _drivers(spec: Spec, sim: Simulation, resource: dict[str, Any]) -> list[Driver]:
+    """Участки, от выпуска которых идёт расход газа или воды на технологию.
+
+    Ресурс с `circuit` — от выпуска своего участка; без него — от суммы участков в единице продукции объекта.
+    Участков нет (или ни одного в этой единице) — пусто: расход идёт от выпуска объекта, как раньше.
+    """
+    if not spec.areas:
+        return []
+    keys = [resource["circuit"]] if resource.get("circuit") else [
+        area.key for area in spec.areas if area.unit == spec.product["unit"]]
+    return [(sim.outputs[key], sim.area_hours[key], _work_hours(sim.area_hours[key])) for key in keys]
+
+
+def _driven(drivers: list[Driver], i: int, day: date) -> float:
+    """Выпуск участков, приходящийся на час `i`: суточный выпуск делится поровну на рабочие часы участка."""
+    total = 0.0
+    for output, hours, counts in drivers:
+        if hours[i].is_work and counts[day]:
+            total += output[day] / counts[day]
+    return total
 
 
 def _resource_anomaly(spec: Spec, resource: str, kind: str) -> dict[str, Any] | None:
@@ -573,7 +727,7 @@ def _resource_anomaly(spec: Spec, resource: str, kind: str) -> dict[str, Any] | 
 
 def simulate_resources(spec: Spec, sim: Simulation) -> dict[str, ResourceSeries]:
     """Часовой расход газа (м³), тепла (Гкал) и воды (м³). Топливо часового учёта не имеет."""
-    work_hours = _work_hours(sim)
+    work_hours = _work_hours(sim.hours)
     heating_days = _heating_days(sim)
     leak_from = len(sim.hours)
     result: dict[str, ResourceSeries] = {}
@@ -589,12 +743,14 @@ def simulate_resources(spec: Spec, sim: Simulation) -> dict[str, ResourceSeries]
         peak = float(r.get("heating_peak_gcal_h" if resource == "heat" else "heating_peak_m3_h", 0) or 0)
         per_unit = float(r.get("process_m3_per_unit", 0) or 0)
         domestic = float(r.get("domestic_m3_per_work_day", 0) or 0)
+        drivers = _drivers(spec, sim, r)
         hourly: list[float] = []
         baseline: list[float] = []
         for i, hour in enumerate(sim.hours):
             day = hour.ts.date()
             share = 1 / work_hours[day] if hour.is_work and work_hours[day] else 0.0
-            flow = per_unit * sim.production[day] * share + domestic * share
+            process = per_unit * _driven(drivers, i, day) if drivers else per_unit * sim.production[day] * share
+            flow = process + domestic * share
             heat = peak * _heating(hour.t_out) if day in heating_days else 0.0
             if resource == "water":
                 flow += WATER_NIGHT_BASE_M3_H
@@ -701,6 +857,7 @@ def write_object_description(spec: Spec, path: Path) -> None:
             units = ", ".join(e.name for e in spec.equipment if e.circuit == c["key"])
             circuit_rows.append([c["title"], c["key"], c.get("driver_unit", p["unit"]), units or "—"])
         _docx_table(d, ["Контур", "Ключ", "Единица выпуска", "Основное оборудование"], circuit_rows)
+        _describe_areas(d, spec)
     d.add_heading("3. Инженерные системы", level=2)
     systems = [e for e in spec.equipment if e.profile not in ("process",)]
     for e in systems:
@@ -709,6 +866,34 @@ def write_object_description(spec: Spec, path: Path) -> None:
         d.add_heading("4. Особенности", level=2)
         d.add_paragraph(o["description"])
     d.save(path)
+
+
+_WEEKDAYS = ("пн", "вт", "ср", "чт", "пт", "сб", "вс")
+
+
+def _days_text(weekdays: list[int]) -> str:
+    days = sorted(set(weekdays))
+    if len(days) == 7:
+        return "ежедневно"
+    if len(days) > 2 and days == list(range(days[0], days[-1] + 1)):
+        return f"{_WEEKDAYS[days[0]]}–{_WEEKDAYS[days[-1]]}"
+    return ", ".join(_WEEKDAYS[day] for day in days)
+
+
+def area_schedule(area: Area) -> str:
+    """Окно участка словами: «с 06:00 до 18:00, пн–пт» — так его ставят окном контура."""
+    s = area.shifts
+    return f"с {int(s['start_hour']):02d}:00 до {int(s['end_hour']):02d}:00, {_days_text(s['weekdays'])}"
+
+
+def _describe_areas(d: Any, spec: Spec) -> None:
+    """Графики и выпуск участков — абзацами под таблицей контуров, саму таблицу не трогаем."""
+    if not spec.areas:
+        return
+    d.add_paragraph("Графики работы и выпуск участков (выпуск учитывается по каждому участку отдельно):")
+    for area in spec.areas:
+        d.add_paragraph(f"{area.title}: работает {area_schedule(area)}; выпуск в рабочие сутки "
+                        f"{_fmt(area.low)}–{_fmt(area.high)} {area.unit}.", style="List Bullet")
 
 
 def write_contract(spec: Spec, path: Path) -> None:
@@ -953,7 +1138,70 @@ def write_resource_bills(spec: Spec, bills_: dict[str, list[ResourceBill]], uplo
     return files
 
 
+#: Колонка участка в отчётах о выпуске при двух контурах и больше. Полиметрика берёт её как точку учёта, а
+#: название участка в ячейке сопоставляет с контуром модели (`app/intake/output.py`, `zone_circuits`): у
+#: выпуска точки учёта не бывает, это контур. Широкую таблицу «Дата | Обжарка, кг | Фасовка, кг» агент
+#: по контурам не разносит — зоны колонок он узнаёт только у часов загрузки и посетителей.
+AREA_COLUMN = "Участок (точка учёта)"
+
+
+def _area_groups(spec: Spec) -> dict[str, list[Area]]:
+    """Участки по единице выпуска: у колонки выпуска одна единица, поэтому на единицу — свой лист."""
+    groups: dict[str, list[Area]] = {}
+    for area in spec.areas:
+        groups.setdefault(area.unit, []).append(area)
+    return groups
+
+
+def write_area_production(spec: Spec, path: Path, head: str, columns: tuple[str, str],
+                          rows: list[tuple[str, dict[str, float]]]) -> None:
+    """Отчёт о выпуске по участкам: строка — период и участок, «Итого» нет (его агент взял бы за объект).
+
+    `columns` — подписи колонок периода и выпуска («Месяц», «Выпуск продукции»), `rows` — подпись периода
+    и выпуск участков за него.
+    """
+    from openpyxl import Workbook
+    from openpyxl.styles import Font
+
+    wb = Workbook()
+    wb.remove(wb.active)
+    groups = _area_groups(spec)
+    for unit, members in groups.items():
+        ws = wb.create_sheet("Выпуск" if len(groups) == 1 else f"Выпуск, {unit}")
+        ws.append([head])
+        ws.append([f"{spec.obj['name']}: {spec.product['title']}"])
+        ws.append([])
+        ws.append([columns[0], AREA_COLUMN, f"{columns[1]}, {unit}"])
+        ws["A1"].font = Font(bold=True, size=13)
+        for label, values in rows:
+            for area in members:
+                ws.append([label, area.title, round(values[area.key])])
+        _fit_columns(ws, (18, max(len(AREA_COLUMN), *(len(a.title) for a in members)) + 4, 26), numeric="C")
+    wb.save(path)
+
+
+def _area_months(spec: Spec, sim: Simulation) -> list[tuple[str, dict[str, float]]]:
+    """Выпуск участков по месяцам, кроме последнего: его сутки — в суточном отчёте."""
+    totals: dict[tuple[int, int], dict[str, float]] = {}
+    for key, days in sim.outputs.items():
+        for day, value in days.items():
+            month = totals.setdefault((day.year, day.month), {})
+            month[key] = month.get(key, 0.0) + value
+    totals.pop((spec.end.year, spec.end.month), None)
+    return [(f"{MONTHS[month - 1]} {year}", values) for (year, month), values in sorted(totals.items())]
+
+
+def _area_days(spec: Spec, sim: Simulation) -> list[tuple[str, dict[str, float]]]:
+    first = spec.end.replace(day=1)
+    days = sorted(day for day in sim.production if day >= first)
+    return [(day.strftime("%d.%m.%Y"), {key: sim.outputs[key][day] for key in sim.outputs}) for day in days]
+
+
 def write_production_year(spec: Spec, sim: Simulation, path: Path) -> None:
+    if spec.areas:
+        write_area_production(spec, path, "Отчёт о выпуске продукции по месяцам", ("Месяц", "Выпуск продукции"),
+                              _area_months(spec, sim))
+        return
     from openpyxl import Workbook  # noqa: PLC0415
     from openpyxl.styles import Font  # noqa: PLC0415
 
@@ -979,11 +1227,15 @@ def write_production_year(spec: Spec, sim: Simulation, path: Path) -> None:
 
 
 def write_production_daily(spec: Spec, sim: Simulation, path: Path) -> tuple[date, date]:
+    first = spec.end.replace(day=1)
+    if spec.areas:
+        head = f"Суточный отчёт о выпуске продукции за {MONTHS[first.month - 1]} {first.year}"
+        write_area_production(spec, path, head, ("Дата", "Выпуск"), _area_days(spec, sim))
+        return first, spec.end
     from openpyxl import Workbook  # noqa: PLC0415
     from openpyxl.styles import Font  # noqa: PLC0415
 
     unit = spec.product["unit"]
-    first = spec.end.replace(day=1)
     wb = Workbook()
     ws = wb.active
     ws.title = "Сутки"
@@ -1054,15 +1306,23 @@ def _lower(name: str) -> str:
     return name[:1].lower() + name[1:]
 
 
-def link_line(link: Link, by_key: dict[str, Equipment], product: dict[str, Any]) -> str:
+def _target_area(link: Link, by_key: dict[str, Equipment], areas: list[Area]) -> Area | None:
+    """Участок оборудования, к которому идёт связь: `output` при участках — выпуск этого участка."""
+    return next((area for area in areas if area.key == by_key[link.target].circuit), None)
+
+
+def link_line(link: Link, by_key: dict[str, Equipment], product: dict[str, Any],
+              areas: list[Area] | None = None) -> str:
     """Как технолог говорит о связи. Название из ведомости стоит в именительном падеже: склонять его
     генератор не умеет, а агенту нужно узнать узел."""
     if link.say:
         return link.say
     target = by_key[link.target].name
     if link.source == OUTPUT:
-        return (f"{target}: потребление идёт за выпуском — больше {product['unit']} за день, больше и берёт, "
-                "без выпуска простаивает.")
+        area = _target_area(link, by_key, areas or [])
+        whose = f"за выпуском участка «{area.title}»" if area else "за выпуском"
+        return (f"{target}: потребление идёт {whose} — больше {area.unit if area else product['unit']} за день, "
+                "больше и берёт, без выпуска простаивает.")
     source = _lower(by_key[link.source].name)
     if link.kind == "process":
         return f"Продукт идёт по цепочке: сначала {source}, потом {_lower(target)}."
@@ -1074,6 +1334,22 @@ def link_line(link: Link, by_key: dict[str, Equipment], product: dict[str, Any])
     return f"{target} включаем, только когда работает {source}; остановились — можно выключать."
 
 
+def area_call_lines(spec: Spec) -> list[tuple[str, str]]:
+    """Графики и выпуск участков словами технолога: по ним помощник ставит окна контуров."""
+    if not spec.areas:
+        return []
+    schedules = "; ".join(f"{area.title} — {area_schedule(area)}" for area in spec.areas)
+    outputs = "; ".join(f"{_lower(area.title)} — в среднем {_fmt((area.low + area.high) / 2)} {area.unit}"
+                        for area in spec.areas)
+    return [
+        ("Энергетик", "Участки работают в одно время? Запишу окно работы каждого участка."),
+        ("Технолог", f"У каждого участка свой график. {schedules}. Вне этих часов оборудование участка должно стоять."),
+        ("Энергетик", "А выпуск считаете общий?"),
+        ("Технолог", (f"Нет, по каждому участку отдельно, за рабочие сутки: {outputs}. В отчётах о выпуске так "
+                      "и разбито по участкам.")),
+    ]
+
+
 def write_call_transcript(spec: Spec, path: Path) -> None:
     by_key = {e.key: e for e in spec.equipment}
     shifts = spec.obj["shifts"]["title"]
@@ -1082,10 +1358,11 @@ def write_call_transcript(spec: Spec, path: Path) -> None:
         ("Технолог", f"Работаем так: {shifts}. Выпуск — {spec.product['title'].lower()}, "
                      f"в среднем {_fmt((spec.product['daily_min'] + spec.product['daily_max']) / 2)} "
                      f"{spec.product['unit']} за смену."),
+        *area_call_lines(spec),
     ]
     if spec.links:
         lines.append(("Энергетик", "Расскажи, что от чего зависит: что идёт за выпуском, что работает под какой участок."))
-        lines += [("Технолог", link_line(link, by_key, spec.product)) for link in spec.links]
+        lines += [("Технолог", link_line(link, by_key, spec.product, spec.areas)) for link in spec.links]
         lines.append(("Энергетик", "Понял, так и свяжем в модели."))
     for anomaly in spec.anomalies:
         if "resource" in anomaly:
@@ -1288,8 +1565,62 @@ def resource_answers(spec: Spec, sim: Simulation, series: dict[str, ResourceSeri
     return lines, findings
 
 
-def _link_end(key: str, by_key: dict[str, Equipment]) -> str:
-    return "Выпуск продукции" if key == OUTPUT else by_key[key].name
+def _link_end(link: Link, by_key: dict[str, Equipment], areas: list[Area]) -> str:
+    if link.source != OUTPUT:
+        return by_key[link.source].name
+    area = _target_area(link, by_key, areas)
+    return f"Выпуск участка «{area.title}»" if area else "Выпуск продукции"
+
+
+def _totals_lines(spec: Spec, total_kwh: float, total_out: float) -> list[str]:
+    """Итоги периода. При участках выпуск разных участков не складывается, удельный — по участкам ниже."""
+    if spec.areas:
+        return [(f"- Потребление по счетам: {_fmt(total_kwh)} кВт·ч; выпуск — по участкам, см. «Выпуск "
+                 "и удельный расход по участкам».")]
+    return [
+        f"- Потребление по счетам: {_fmt(total_kwh)} кВт·ч; выпуск: {_fmt(total_out)} {spec.product['unit']}.",
+        f"- Удельный расход: {_fmt(total_kwh / total_out, 3) if total_out else '—'} кВт·ч/{spec.product['unit']}.",
+    ]
+
+
+def _area_kwh(spec: Spec, sim: Simulation, area: Area, hours: list[int], *, metered: bool) -> float:
+    """кВт·ч оборудования участка за часы `hours`; `metered` — только со своим прибором учёта."""
+    keys = [f"{e.key}#{n}" for e in spec.equipment if e.circuit == area.key and (e.metered or not metered)
+            for n in range(1, e.count + 1)]
+    return sum(sim.units[key][i] for key in keys for i in hours)
+
+
+def _ratio(kwh: float, output: float) -> str:
+    return _fmt(kwh / output, 3) if output else "—"
+
+
+def area_answers(spec: Spec, sim: Simulation) -> list[str]:
+    """Выпуск, окно и удельный расход каждого участка: что должен показать обзор «Выпуск и удельный расход»."""
+    if not spec.areas:
+        return []
+    first = spec.end.replace(day=1)
+    lines = ["", "## Выпуск и удельный расход по участкам", "",
+             (f"Выпуск в отчётах записан по участкам (колонка «{AREA_COLUMN}»): помощник разносит его по контурам "
+              "модели с теми же названиями. Полиметрика считает удельный по контурам по счётчикам узлов контура, "
+              "общие системы (оборудование без участка) между участками не делит."), "",
+             ("| Участок | Окно работы | Выпуск за период | кВт·ч оборудования участка | кВт·ч на единицу "
+              "| Последний месяц по счётчикам узлов, кВт·ч на единицу |"),
+             "|---|---|---:|---:|---:|---:|"]
+    every = list(range(len(sim.hours)))
+    for area in spec.areas:
+        output = sim.outputs[area.key]
+        total = sum(output.values())
+        kwh = _area_kwh(spec, sim, area, every, metered=False)
+        days = {day for day, value in output.items() if day >= first and value}
+        month = [i for i, hour in enumerate(sim.hours) if hour.ts.date() in days]
+        sensors = _area_kwh(spec, sim, area, month, metered=True)
+        lines.append(f"| {area.title} | {area_schedule(area)} | {_fmt(total)} {area.unit} | {_fmt(kwh)} "
+                     f"| {_ratio(kwh, total)} кВт·ч/{area.unit} "
+                     f"| {_ratio(sensors, sum(output[day] for day in days))} кВт·ч/{area.unit} |")
+    lines += ["", ("Окна контуров технолог назвал в разговоре (графики участков). Если после разбора у контура "
+                   "нет окна работы, напишите помощнику: «Поставь окна работы контуров по графикам участков "
+                   "из разговора с технологом».")]
+    return lines
 
 
 def write_answers(spec: Spec, sim: Simulation, bills_: list[Bill], path: Path,
@@ -1324,8 +1655,7 @@ def write_answers(spec: Spec, sim: Simulation, bills_: list[Bill], path: Path,
         "Это ответы к демо-пакету. Загрузите пакет в Полиметрику и сравните, что найдёт анализ.",
         "",
         f"- Объект: {spec.obj['name']}; период: {_start(spec):%d.%m.%Y} — {spec.end:%d.%m.%Y}.",
-        f"- Потребление по счетам: {_fmt(total_kwh)} кВт·ч; выпуск: {_fmt(total_out)} {spec.product['unit']}.",
-        f"- Удельный расход: {_fmt(total_kwh / total_out, 3) if total_out else '—'} кВт·ч/{spec.product['unit']}.",
+        *_totals_lines(spec, total_kwh, total_out),
         "",
         "## Заложенные потери",
         "",
@@ -1337,8 +1667,10 @@ def write_answers(spec: Spec, sim: Simulation, bills_: list[Bill], path: Path,
         lines += ["", "## Связи, которые проговорил технолог", "",
                   "Агент должен собрать их при разборе расшифровки в карточку «Оборудование и учёт».", "",
                   "| Откуда | Куда | Вид | Метод |", "|---|---|---|---|",
-                  *[f"| {_link_end(link.source, by_key)} | {by_key[link.target].name} | {LINK_KIND_TITLES[link.kind]} "
+                  *[f"| {_link_end(link, by_key, spec.areas)} | {by_key[link.target].name} "
+                    f"| {LINK_KIND_TITLES[link.kind]} "
                     f"| {LINK_METHOD_TITLES.get(link.method or '', '—')} |" for link in spec.links]]
+    lines += area_answers(spec, sim)
     resource_lines, resource_findings = resource_answers(spec, sim, series or {}, rbills or {})
     lines += resource_lines
     findings += resource_findings
@@ -1351,17 +1683,23 @@ def write_answers(spec: Spec, sim: Simulation, bills_: list[Bill], path: Path,
     return findings
 
 
-HOW_TO = """# Как загрузить пакет в Полиметрику
+_HOW_TO_HEAD = """# Как загрузить пакет в Полиметрику
 
 1. Откройте app.polimetrika.ru → «Новый объект».
-2. В чат помощника приложите ВСЕ файлы из папки `upload/` (можно одним сообщением) и напишите:
+"""
+_HOW_TO_ALL = """2. В чат помощника приложите ВСЕ файлы из папки `upload/` (можно одним сообщением) и напишите:
    «Разбери документы и заполни проект».
 3. Дождитесь распознавания (1–5 минут) и проверьте карточки предложений: параметры объекта,
    энергомодель, оборудование, ряды по счетам, выпуск. Связи, которые технолог проговорил в разговоре,
    лежат в той же карточке «Оборудование и учёт», что и узлы, с цитатой из разговора. Нажмите «Подтвердить».
-4. Спросите помощника о разговоре с технологом: «Что из разговора с технологом стоит внести в модель?»
+"""
 
-5. Показания приборов: приложите в тот же чат `telemetry/показания_приборов_учёта.csv` вместе
+
+def _how_to_tail(step: int) -> str:
+    ask = "Спросите помощника о разговоре с технологом: «Что из разговора с технологом стоит внести в модель?»"
+    return f"""{step}. {ask}
+
+{step + 1}. Показания приборов: приложите в тот же чат `telemetry/показания_приборов_учёта.csv` вместе
    с `telemetry/перечень_приборов_учёта.xlsx` и напишите «Загрузи показания приборов учёта из файла».
    Подтвердите карточку «Загрузить показания» — почасовые данные уйдут в хранилище показаний за минуту.
    Проверить: «Сколько кВт·ч потребило <оборудование> за <месяц> по суткам?»
@@ -1373,7 +1711,46 @@ HOW_TO = """# Как загрузить пакет в Полиметрику
 """
 
 
-def resource_how_to(spec: Spec) -> str:
+HOW_TO = _HOW_TO_HEAD + _HOW_TO_ALL + _how_to_tail(4)
+
+#: Папка отчётов о выпуске при участках: их прикладывают вторым сообщением, когда контуры уже в модели.
+#: Выпуск, разобранный раньше контуров, агент складывает в выпуск объекта («по зонам не разнесено»).
+PRODUCTION_LATER = "выпуск_вторым_сообщением"
+
+
+def _area_steps(spec: Spec) -> str:
+    """Шаги 2–5 при участках: документы без отчётов о выпуске, оборудование по участкам, затем отчёты о выпуске.
+
+    При разборе агент не относит оборудование к контурам, а без этого удельный по контурам пуст (стенд 14.11).
+    """
+    titles = ", ".join(f"«{area.title}»" for area in spec.areas)
+    return f"""2. В чат помощника приложите все файлы из папки `upload/`, КРОМЕ папки `upload/{PRODUCTION_LATER}/`,
+   и напишите «Разбери документы и заполни проект». Отчёты о выпуске пока не прикладывайте: выпуск
+   разносится по контурам модели, а контуров в ней ещё нет.
+3. Дождитесь распознавания (1–5 минут) и проверьте карточки предложений: параметры объекта,
+   энергомодель с контурами {titles}, оборудование, ряды по счетам. Связи, которые технолог проговорил
+   в разговоре, лежат в той же карточке «Оборудование и учёт», что и узлы, с цитатой из разговора.
+   Нажмите «Подтвердить».
+4. Отнесите оборудование к участкам — без этого удельный расход по контурам останется пустым. Напишите:
+   «Отнеси оборудование к контурам по описанию объекта: что на каком участке работает».
+   Подтвердите карточку: у каждого узла участка появится его контур.
+5. Только после этого приложите вторым сообщением оба файла из `upload/{PRODUCTION_LATER}/`
+   (`05_Отчёт_о_выпуске_по_месяцам.xlsx` и `06_Суточный_выпуск.xlsx`) и напишите:
+   «Вот отчёты о выпуске по участкам, разнеси выпуск по контурам».
+   Подтвердите карточку выпуска: в ней выпуск каждого контура (колонка «{AREA_COLUMN}») и окна
+   работы контуров из разговора с технологом. Если окон в карточке нет, напишите:
+   «Поставь окна работы контуров по графикам участков из разговора с технологом».
+"""
+
+
+def how_to(spec: Spec) -> str:
+    """`КАК ЗАГРУЗИТЬ.md`: без участков — все документы одним сообщением, при участках — выпуск вторым."""
+    if not spec.areas:
+        return HOW_TO + resource_how_to(spec)
+    return _HOW_TO_HEAD + _area_steps(spec) + _how_to_tail(6) + resource_how_to(spec, 8)
+
+
+def resource_how_to(spec: Spec, step: int = 6) -> str:
     """Шаги загрузки счетов и показаний газа, тепла, воды и топлива — только для описанных ресурсов."""
     if not spec.resources:
         return ""
@@ -1381,7 +1758,7 @@ def resource_how_to(spec: Spec) -> str:
     text = f"""
 ## Газ, тепло, вода и топливо
 
-6. Счета по другим ресурсам лежат в {folders}.
+{step}. Счета по другим ресурсам лежат в {folders}.
    Если не приложили их на шаге 2, приложите вторым сообщением и напишите «Вот счета за газ, тепло, воду
    и топливо». Подтвердите карточки «Документы» и «Ряды по счетам»:
    у каждого ресурса свои ряды, тариф и удельный расход, в обзоре появится переключатель ресурса и «Всего, ₽».
@@ -1389,7 +1766,7 @@ def resource_how_to(spec: Spec) -> str:
     meters = resource_meters(spec)
     if meters:
         files = ", ".join(f"`telemetry/{METER_FILES[m['resource']]}`" for m in meters)
-        text += f"""7. Показания счётчиков на вводах: {files}.
+        text += f"""{step + 1}. Показания счётчиков на вводах: {files}.
    Каждый файл — отдельным сообщением с текстом «Загрузи показания приборов учёта из файла».
    Прибор привяжется к узлу ввода своего ресурса из ведомости («{meters[0]['node']}» и др.).
    Проверить: «Сколько м³ газа (Гкал, м³ воды) ушло на вводе за последнюю неделю по суткам?»
@@ -1430,9 +1807,11 @@ def build(spec: Spec, out: Path) -> dict[str, Any]:
     for i, bill in enumerate(bills_, start=1):
         name = f"Счёт_{bill.year}-{bill.month:02d}.pdf"
         files.append(write_bill(spec, bill, 4000 + i * 17, bills_dir / name, font))
-    files.append(upload / "05_Отчёт_о_выпуске_по_месяцам.xlsx")
+    production = upload / PRODUCTION_LATER if spec.areas else upload
+    production.mkdir(exist_ok=True)
+    files.append(production / "05_Отчёт_о_выпуске_по_месяцам.xlsx")
     write_production_year(spec, sim, files[-1])
-    files.append(upload / "06_Суточный_выпуск.xlsx")
+    files.append(production / "06_Суточный_выпуск.xlsx")
     write_production_daily(spec, sim, files[-1])
     files.append(upload / "07_Разговор_с_технологом.docx")
     write_call_transcript(spec, files[-1])
@@ -1444,7 +1823,7 @@ def build(spec: Spec, out: Path) -> dict[str, Any]:
     meters = write_resource_telemetry(spec, sim, flows, out / "telemetry")
     devices = write_telemetry(spec, sim, out / "telemetry", meters)
     findings = write_answers(spec, sim, bills_, out / "ЧТО ЗАЛОЖЕНО.md", flows, rbills)
-    (out / "КАК ЗАГРУЗИТЬ.md").write_text(HOW_TO + resource_how_to(spec), encoding="utf-8")
+    (out / "КАК ЗАГРУЗИТЬ.md").write_text(how_to(spec), encoding="utf-8")
 
     by_equipment: dict[str, float] = {}
     for key, series in sim.units.items():
@@ -1457,6 +1836,9 @@ def build(spec: Spec, out: Path) -> dict[str, Any]:
         "total_kwh": round(total),
         "share_by_equipment": {k: round(v / total, 3) for k, v in sorted(by_equipment.items(), key=lambda x: -x[1])},
         "production_total": round(sum(sim.production.values())),
+        **({"production_by_circuit": {
+            area.key: {"title": area.title, "unit": area.unit, "total": round(sum(sim.outputs[area.key].values()))}
+            for area in spec.areas}} if spec.areas else {}),
         "findings": findings,
         "devices": devices,
         "resources": {
