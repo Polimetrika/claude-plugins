@@ -292,8 +292,11 @@ def test_production_goes_second_when_areas(coffee) -> None:
     text = (out / "КАК ЗАГРУЗИТЬ.md").read_text(encoding="utf-8")
     first = text.index(f"КРОМЕ папки `upload/{gen.PRODUCTION_LATER}/`")
     confirm = text.index("энергомодель с контурами «Обжарка», «Фасовка»")
+    # Агент сам не относит узлы к контурам: без этого шага удельный по контурам пуст (стенд 14.11).
+    phrase = "«Отнеси оборудование к контурам по описанию объекта: что на каком участке работает»"
+    equipment = text.index(f"\n   {phrase}.\n")  # фраза целиком на своей строке
     second = text.index("«Вот отчёты о выпуске по участкам, разнеси выпуск по контурам»")
-    assert first < confirm < second
+    assert first < confirm < equipment < second
     assert "«Поставь окна работы контуров по графикам участков из разговора с технологом»" in text
     assert "ВСЕ файлы из папки `upload/` (можно одним сообщением)" not in text
     steps = [int(line.split(".")[0]) for line in text.splitlines() if line[:1].isdigit()]
@@ -307,3 +310,5 @@ def test_production_in_upload_without_areas(tmp_path: Path) -> None:
     assert not (tmp_path / "pack" / "upload" / gen.PRODUCTION_LATER).exists()
     text = (tmp_path / "pack" / "КАК ЗАГРУЗИТЬ.md").read_text(encoding="utf-8")
     assert "ВСЕ файлы из папки `upload/` (можно одним сообщением)" in text
+    assert "Отнеси оборудование к контурам" not in text
+    assert text == gen.HOW_TO + gen.resource_how_to(spec)
