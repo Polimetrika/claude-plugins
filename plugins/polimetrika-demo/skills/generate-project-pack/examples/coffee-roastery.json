@@ -29,10 +29,10 @@
   "equipment": [
     {"key": "roaster", "name": "Ростер", "model": "Probat G60", "count": 3, "rated_kw": 18, "profile": "process", "load": 0.75, "idle": 0.0, "location": "Участок обжарки", "circuit": "roasting"},
     {"key": "packing_line", "name": "Линия фасовки", "model": "Fres-co FX", "count": 1, "rated_kw": 12, "profile": "process", "load": 0.7, "idle": 0.0, "location": "Участок фасовки", "circuit": "packing"},
-    {"key": "compressor", "name": "Компрессор винтовой", "model": "Atlas Copco GA15", "count": 2, "rated_kw": 15, "profile": "shift_system", "load": 0.65, "idle": 0.0, "location": "Компрессорная"},
+    {"key": "compressor", "name": "Компрессор винтовой", "model": "Atlas Copco GA15", "count": 2, "rated_kw": 15, "profile": "shift_system", "load": 0.65, "idle": 0.0, "location": "Компрессорная", "circuit": "packing"},
     {"key": "nitrogen", "name": "Азотная станция", "model": "Provita PSA-10", "count": 1, "rated_kw": 5.5, "profile": "shift_system", "load": 0.9, "idle": 0.0, "location": "Компрессорная", "circuit": "packing"},
     {"key": "supply_vent", "name": "Приточная установка ПВ-1", "model": "Breezart 6000", "count": 1, "rated_kw": 11, "profile": "ventilation", "load": 0.8, "idle": 0.0, "location": "Венткамера"},
-    {"key": "exhaust", "name": "Вытяжка участка обжарки", "model": "ВР-86-77", "count": 1, "rated_kw": 4, "profile": "process", "load": 0.9, "idle": 0.0, "location": "Участок обжарки", "circuit": "roasting", "metered": false},
+    {"key": "exhaust", "name": "Вытяжка участка обжарки", "model": "ВР-86-77", "count": 1, "rated_kw": 4, "profile": "shift_system", "load": 0.9, "idle": 0.0, "location": "Участок обжарки", "circuit": "roasting", "metered": false},
     {"key": "kkb", "name": "Компрессорно-конденсаторный блок", "model": "Daikin ERQ250", "count": 2, "rated_kw": 9, "profile": "cooling", "load": 0.8, "idle": 0.0, "location": "Кровля"},
     {"key": "lighting", "name": "Освещение цеха", "model": "LED 150 Вт", "count": 1, "rated_kw": 6, "profile": "lighting", "load": 1.0, "idle": 0.05, "location": "Цех", "metered": false},
     {"key": "air_curtain", "name": "Тепловая завеса ворот", "model": "Тепломаш КЭВ-12", "count": 1, "rated_kw": 12, "profile": "heating", "load": 0.6, "location": "Ворота склада", "in_inventory": false, "metered": false}
@@ -51,13 +51,15 @@
   },
   "links": [
     {"from": "output", "to": "roaster", "kind": "metric", "method": "regression"},
-    {"from": "roaster", "to": "packing_line", "kind": "process"},
     {"from": "output", "to": "packing_line", "kind": "metric", "method": "regression"},
-    {"from": "packing_line", "to": "compressor", "kind": "metric", "method": "window", "say": "Компрессоры дают сжатый воздух только на линию фасовки: пока фасовка работает — нужны, остановили фасовку — компрессоры можно глушить."},
+    {"from": "packing_line", "to": "compressor", "kind": "metric", "method": "window", "say": "Компрессор винтовой даёт сжатый воздух только на линию фасовки: пока фасовка работает — нужен, остановили фасовку — компрессоры можно глушить."},
     {"from": "packing_line", "to": "nitrogen", "kind": "metric", "method": "window_const", "say": "Азотная станция работает только на фасовку, азот идёт в упаковку. Нагрузка у неё ровная, от объёма почти не зависит."},
     {"from": "roaster", "to": "exhaust", "kind": "unmeasured"}
   ],
   "period": {"end": "2026-10-31", "bill_months": 12, "telemetry_days": 31},
   "climate": {"t_mean": 5.5, "t_amp": 16, "t_day_amp": 4.5},
-  "call_notes": ["Ростер №3 включаем только под крупные заказы, обычно работают два."]
+  "call_notes": [
+    "Ростер №3 включаем только под крупные заказы, обычно работают два.",
+    "Обжаренное зерно отлёживается и идёт с обжарки на фасовку."
+  ]
 }

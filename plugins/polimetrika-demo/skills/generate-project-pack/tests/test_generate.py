@@ -1,4 +1,5 @@
-"""Тесты генератора демо-пакета: совместимость без участков и выпуск, график и ресурсы по участкам.
+"""Тесты генератора демо-пакета: совместимость без участков, выпуск, график и ресурсы по участкам, связи
+по правилам модели.
 
 Запуск из корня репозитория: `pytest plugins/polimetrika-demo/skills/generate-project-pack/tests`.
 Нужны openpyxl, python-docx; reportlab — по желанию (без него счета выходят в DOCX, на тесты это не влияет).
@@ -31,27 +32,35 @@ def _module(path: Path):
     return module
 
 
-#: `GENERATE_PY` — другой файл генератора: так считались эталонные отпечатки ниже (генератор 0.2.1).
+#: `GENERATE_PY` — другой файл генератора: так считались эталонные отпечатки ниже.
 gen = _module(Path(os.environ.get("GENERATE_PY", SKILL / "scripts" / "generate.py")))
 
-#: Отпечатки пакета генератора 0.2.1 (до участков) на `fixtures/no-circuits.json`: без контуров и с одним
-#: контуром пакет не меняется ни в одной цифре и ни в одной строке.
+#: Отпечатки пакета 0.4.0 на `fixtures/no-circuits.json`: без контуров и с одним контуром.
 GOLDEN = {
-    "no_circuits": "6126036ef978a99c1c0f16195994244998ff77eb78f25d76c40e94a4cd043f0e",
-    "one_circuit": "b342d00a9620099863160e828f350b6b5b804e0dd81b73244cf877145ed6f987",
+    "no_circuits": "9a17ac960765b440df3613c9ea16704eeaf981b37c9be2fa8b0e0cf1905348a9",
+    "one_circuit": "ab45be073d0ff3a124c0cb5362910816ee26860e3e5aa8e1b65a271604249f5a",
 }
+#: Отпечаток только чисел (счета, показания, выпуск, ведомость — `digest(numbers=True)`) генератора 0.2.1, до
+#: участков, — один на оба случая: в 0.3.0 и 0.4.0 пакет без участков в цифрах не изменился. 0.4.0 поменял
+#: лишь связи — разговор с технологом и таблицу связей в «ЧТО ЗАЛОЖЕНО.md».
+NUMBERS = "b13a5285808fd2b01ee8f59dfe044706f12a7241eae91576359f8bf7ff1a3b1b"
 
 
 def _raw(name: str) -> dict:
     return json.loads((FIXTURES / name).read_text(encoding="utf-8"))
 
 
+#: Узлы фикстуры, которые связаны в разговоре: при контурах в модели они стоят в контуре — связь от выпуска
+#: идёт только к узлу с контуром, а процесс и система связаны только внутри контура.
+LINKED = ("roaster", "packing_line", "compressor", "nitrogen", "exhaust")
+
+
 def _one_circuit(raw: dict) -> dict:
     raw = copy.deepcopy(raw)
-    raw["circuits"] = [{"key": "roasting", "title": "Обжарка", "driver_unit": "кг"}]
+    raw["circuits"] = [{"key": "production", "title": "Производство", "driver_unit": "кг"}]
     for item in raw["equipment"]:
-        if item["key"] in ("roaster", "exhaust"):
-            item["circuit"] = "roasting"
+        if item["key"] in LINKED:
+            item["circuit"] = "production"
     return raw
 
 
@@ -72,19 +81,20 @@ def _docx(path: Path) -> list:
     ]
 
 
-def digest(out: Path) -> str:
+def digest(out: Path, *, numbers: bool = False) -> str:
     """Отпечаток содержимого пакета без того, что зависит от машины: пути архива, шрифта PDF, метаданных
-    DOCX/XLSX. Счета — по `summary.json` (кВт·ч, суммы), документы — по тексту и ячейкам."""
+    DOCX/XLSX. Счета — по `summary.json` (кВт·ч, суммы), документы — по тексту и ячейкам. `numbers` — только
+    числа: `summary.json`, показания (CSV) и таблицы (XLSX), без текстов (MD, DOCX)."""
     summary = json.loads((out / "summary.json").read_text(encoding="utf-8"))
     for key in ("upload_zip", "pdf_font", "upload_files"):
         summary.pop(key)
     parts: list = [summary]
     for path in sorted(out.rglob("*")):
-        if path.suffix in (".csv", ".md"):
+        if path.suffix == ".csv" or (path.suffix == ".md" and not numbers):
             parts.append((path.name, path.read_text(encoding="utf-8")))
         elif path.suffix == ".xlsx":
             parts.append((path.name, _xlsx(path)))
-        elif path.suffix == ".docx" and path.parent.name == "upload":
+        elif path.suffix == ".docx" and path.parent.name == "upload" and not numbers:
             parts.append((path.name, _docx(path)))
     text = json.dumps(parts, ensure_ascii=False, default=str, sort_keys=True)
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
@@ -98,6 +108,7 @@ def test_pack_without_areas_is_unchanged(case: str, tmp_path: Path) -> None:
     raw = _raw("no-circuits.json")
     spec = _load(raw if case == "no_circuits" else _one_circuit(raw), tmp_path)
     gen.build(spec, tmp_path / "pack")
+    assert digest(tmp_path / "pack", numbers=True) == NUMBERS
     assert digest(tmp_path / "pack") == GOLDEN[case]
 
 
@@ -283,8 +294,9 @@ def test_area_spec_errors(change, message: str, tmp_path: Path) -> None:
 
 
 def test_production_goes_second_when_areas(coffee) -> None:
-    """Выпуск, разобранный раньше контуров модели, агент складывает в объект: при участках отчёты о выпуске
-    лежат отдельно и прикладываются вторым сообщением, после подтверждения модели."""
+    """Разбор не видит контуров из открытых карточек прошлых ходов: при участках отчёты о выпуске лежат
+    отдельно и прикладываются вторым сообщением, после подтверждения модели. Оборудование по контурам разбор
+    ставит сам (агент, docs#678 срез I) — ручного шага «отнеси оборудование к контурам» больше нет."""
     _, _, out = coffee
     later = out / "upload" / gen.PRODUCTION_LATER
     assert sorted(p.name for p in later.iterdir()) == ["05_Отчёт_о_выпуске_по_месяцам.xlsx", "06_Суточный_выпуск.xlsx"]
@@ -292,11 +304,9 @@ def test_production_goes_second_when_areas(coffee) -> None:
     text = (out / "КАК ЗАГРУЗИТЬ.md").read_text(encoding="utf-8")
     first = text.index(f"КРОМЕ папки `upload/{gen.PRODUCTION_LATER}/`")
     confirm = text.index("энергомодель с контурами «Обжарка», «Фасовка»")
-    # Агент сам не относит узлы к контурам: без этого шага удельный по контурам пуст (стенд 14.11).
-    phrase = "«Отнеси оборудование к контурам по описанию объекта: что на каком участке работает»"
-    equipment = text.index(f"\n   {phrase}.\n")  # фраза целиком на своей строке
     second = text.index("«Вот отчёты о выпуске по участкам, разнеси выпуск по контурам»")
-    assert first < confirm < equipment < second
+    assert first < confirm < second
+    assert "Отнеси оборудование к контурам" not in text
     assert "«Поставь окна работы контуров по графикам участков из разговора с технологом»" in text
     assert "ВСЕ файлы из папки `upload/` (можно одним сообщением)" not in text
     steps = [int(line.split(".")[0]) for line in text.splitlines() if line[:1].isdigit()]
@@ -312,3 +322,116 @@ def test_production_in_upload_without_areas(tmp_path: Path) -> None:
     assert "ВСЕ файлы из папки `upload/` (можно одним сообщением)" in text
     assert "Отнеси оборудование к контурам" not in text
     assert text == gen.HOW_TO + gen.resource_how_to(spec)
+
+
+# --- Связи по правилам модели ----------------------------------------------------------------------------
+
+
+@pytest.fixture(scope="module")
+def zhbi(tmp_path_factory: pytest.TempPathFactory):
+    """Эталон «Примера» — `sample-packs/zhbi-pribrezhny/spec.json` агента (копия в `fixtures/`)."""
+    spec = gen.load_spec(FIXTURES / "zhbi-pribrezhny.json")
+    out = tmp_path_factory.mktemp("zhbi") / "pack"
+    gen.build(spec, out)
+    return spec, out
+
+
+def test_reference_spec_passes_link_rules(zhbi) -> None:
+    spec, out = zhbi
+    by_key = {e.key: e for e in spec.equipment}
+    assert spec.links and all(gen.link_problem(link, by_key, has_circuits=True) is None for link in spec.links)
+    assert {link.kind for link in spec.links} <= {"metric", "unmeasured"}
+    summary = json.loads((out / "summary.json").read_text(encoding="utf-8"))
+    assert set(summary["production_by_circuit"]) == {"concrete", "rebar", "molding"}
+    assert "технологическая" not in (out / "ЧТО ЗАЛОЖЕНО.md").read_text(encoding="utf-8")
+
+
+def test_transcript_names_every_link_target(zhbi) -> None:
+    spec, out = zhbi
+    text = "\n".join(_docx(out / "upload" / "07_Разговор_с_технологом.docx"))
+    by_key = {e.key: e for e in spec.equipment}
+    lines = [gen.link_line(link, by_key, spec.product, spec.areas) for link in spec.links]
+    assert all(line in text and by_key[link.target].name in line for link, line in zip(spec.links, lines))
+    assert "Продукт идёт по цепочке" not in text
+
+
+def _zhbi_raw() -> dict:
+    return _raw("zhbi-pribrezhny.json")
+
+
+def _add_link(raw: dict, **link) -> None:
+    raw["links"].append(link)
+
+
+def _set(raw: dict, key: str, **fields) -> None:
+    item = next(e for e in raw["equipment"] if e["key"] == key)
+    for name, value in fields.items():
+        if value is None:
+            item.pop(name, None)
+        else:
+            item[name] = value
+
+
+@pytest.mark.parametrize(
+    ("change", "message"),
+    [
+        # Связи эталона до 0.4.0, которые черновик агента отклонял.
+        (lambda raw: _add_link(raw, **{"from": "vibro", "to": "crane", "kind": "metric", "method": "window"}),
+         "связь процесс → процесс правилами модели не предусмотрена"),
+        (lambda raw: _add_link(raw, **{"from": "straightener", "to": "welder", "kind": "process"}),
+         "вид «process» правила модели Полиметрики не принимают"),
+        (lambda raw: _set(raw, "compressor", circuit=None),
+         (r"узлы в разных контурах \(mixer \(бетоносмеситель двухвальный\): concrete, compressor \(компрессор "
+          r"винтовой\): без контура\)")),
+        (lambda raw: _set(raw, "aspiration", profile="process"), "связь процесс → процесс"),
+        # Прочие правила.
+        (lambda raw: _add_link(raw, **{"from": "welder", "to": "steam_chamber", "kind": "unmeasured"}),
+         "связей между контурами нет"),
+        (lambda raw: _add_link(raw, **{"from": "mixer", "to": "lighting", "kind": "unmeasured"}),
+         "связей между контурами нет"),
+        (lambda raw: _add_link(raw, **{"from": "output", "to": "boiler_pump", "kind": "metric",
+                                       "method": "regression"}),
+         "от выпуска связь идёт только к технологическому оборудованию"),
+        (lambda raw: _add_link(raw, **{"from": "compressor", "to": "conveyor", "kind": "unmeasured"}),
+         "обратная связь система → процесс"),
+        (lambda raw: _set(raw, "crane", circuit=None), "у crane .* нет контура, а в модели контуры есть"),
+        (lambda raw: raw["links"][0].__setitem__("method", "window_const"), "метод: regression, window"),
+        (lambda raw: raw["links"][1].update(kind="unmeasured", method=None),
+         "вид связи: metric"),
+    ],
+)
+def test_forbidden_links_are_spec_errors(change, message: str, tmp_path: Path) -> None:
+    raw = _zhbi_raw()
+    change(raw)
+    with pytest.raises(gen.SpecError, match=message):
+        _load(raw, tmp_path)
+
+
+def test_say_must_name_link_target(tmp_path: Path) -> None:
+    raw = _zhbi_raw()
+    link = next(item for item in raw["links"] if item["to"] == "compressor")
+    link["say"] = "Компрессоры нужны только под замес, без замесов их можно глушить."
+    with pytest.raises(gen.SpecError, match="say: в реплике нет названия «Компрессор винтовой» из ведомости"):
+        _load(raw, tmp_path)
+    link["say"] = "А компрессор ВИНТОВОЙ нужен только под замес."  # регистр и знаки не важны
+    assert _load(raw, tmp_path).links
+
+
+@pytest.mark.parametrize("name", ["examples/coffee-roastery.json", "examples/asphalt-plant.json",
+                                  "tests/fixtures/zhbi-pribrezhny.json"])
+def test_default_links_follow_model_rules(name: str, tmp_path: Path) -> None:
+    raw = json.loads((SKILL / name).read_text(encoding="utf-8"))
+    raw.pop("links")
+    spec = _load(raw, tmp_path)
+    by_key = {e.key: e for e in spec.equipment}
+    assert spec.links
+    assert [gen.link_problem(link, by_key, has_circuits=True) for link in spec.links] == [None] * len(spec.links)
+    # Технологическое оборудование без счётчика связи не получает: процесс → процесс правила не принимают.
+    unmetered = {e.key for e in spec.equipment if e.profile == "process" and not e.metered}
+    assert not unmetered & {link.target for link in spec.links}
+
+
+def test_examples_pass_link_rules() -> None:
+    for name in ("coffee-roastery.json", "asphalt-plant.json"):
+        spec = gen.load_spec(SKILL / "examples" / name)
+        assert spec.links and all(link.kind != "process" for link in spec.links)
