@@ -131,9 +131,55 @@ class Link:
 
 #: Выпуск продукции как источник связи: узел-драйвер, который агент заводит сам.
 OUTPUT = "output"
-LINK_KINDS = {"metric", "process", "unmeasured"}
+#: Виды связей из разговора. «Продукт идёт с участка на участок» (`process`) правила модели не принимают:
+#: это обычная реплика `call_notes` без связи.
+LINK_KINDS = {"metric", "unmeasured"}
 #: Методы связи-измерения, которые агент считает по данным (docs#610): от выпуска, в окне процесса.
 LINK_METHODS = {"regression", "window", "window_const"}
+
+#: Вид узла энергомодели по профилю оборудования — `default_kind` профилей агента
+#: (polimetrika-data-agent, `app/catalog/data/profiles.yaml:4-43`). Выпуск (`output`) — драйвер.
+PROFILE_KINDS = {"process": "process", "shift_system": "system", "constant": "system", "cooling": "system",
+                 "heating": "system", "ventilation": "system", "lighting": "system"}
+#: Методы связи класса узла по профилю — `link_methods` там же; по ним `default_links` выбирает метод.
+PROFILE_LINK_METHODS = {
+    "process": ("regression", "window"),
+    "shift_system": ("window", "regression"),
+    "constant": ("window_const", "window"),
+    "cooling": ("threshold", "regression"),
+    "heating": ("threshold", "regression"),
+    "ventilation": ("regression", "threshold"),
+    "lighting": ("window", "window_const"),
+}
+
+
+@dataclass(frozen=True)
+class LinkRule:
+    """Строка таблицы правил связей: допустимые виды связи и методы и где должны стоять концы."""
+
+    kinds: tuple[str, ...]
+    methods: tuple[str, ...] = ()
+    #: Оба конца в одном контуре; у модели без контуров оба без контура.
+    own_circuit: bool = False
+    #: Улица действует на систему любого контура.
+    any_circuit: bool = False
+    #: Цель обязана быть в контуре, если контуры в модели есть: регрессия идёт по выпуску контура.
+    needs_circuit: bool = False
+
+
+#: Копия `LINK_RULES` агента (polimetrika-data-agent, `app/domain/model_contract.py:274`): что от чего может
+#: зависеть, пар вне таблицы нет. Плагин от агента не зависит, общий пакет ради одной таблицы не заводим —
+#: меняя правила там, поменяйте и здесь. Улицы и результата генератор не заводит, их строки — для сверки.
+LINK_RULES = {
+    ("driver", "process"): LinkRule(("metric",), ("regression", "window"), own_circuit=True, needs_circuit=True),
+    ("process", "system"): LinkRule(("metric", "unmeasured"), ("regression", "window", "window_const"),
+                                    own_circuit=True),
+    ("process", "result"): LinkRule(("result",)),
+    ("system", "result"): LinkRule(("result",)),
+    ("external", "system"): LinkRule(("metric",), ("threshold",), any_circuit=True),
+}
+_KIND_TITLE = {"driver": "выпуск", "process": "процесс", "system": "система", "external": "улица",
+               "result": "результат"}
 
 
 def _req(data: dict[str, Any], key: str, where: str) -> Any:
@@ -328,14 +374,17 @@ def _resources(raw: Any) -> dict[str, dict[str, Any]]:
     return {key: raw[key] for key in RESOURCES if key in raw}
 
 
-def _link_from(item: Any, where: str, keys: set[str]) -> Link:
+def _link_from(item: Any, where: str, by_key: dict[str, Equipment]) -> Link:
     if not isinstance(item, dict):
         raise SpecError(f"{where}: ожидается объект")
     source, target, kind = _req(item, "from", where), _req(item, "to", where), _req(item, "kind", where)
-    if source != OUTPUT and source not in keys:
+    if source != OUTPUT and source not in by_key:
         raise SpecError(f"{where}.from: нет оборудования «{source}» (или «{OUTPUT}» — выпуск)")
-    if target not in keys or target == source:
+    if target not in by_key or target == source:
         raise SpecError(f"{where}.to: нет оборудования «{target}»")
+    if kind == "process":
+        raise SpecError(f"{where}.kind: вид «process» правила модели Полиметрики не принимают — скажите «продукт "
+                        "идёт с участка на участок» репликой в `call_notes`, без связи")
     if kind not in LINK_KINDS:
         raise SpecError(f"{where}.kind: одно из {sorted(LINK_KINDS)}")
     method = item.get("method")
@@ -343,53 +392,113 @@ def _link_from(item: Any, where: str, keys: set[str]) -> Link:
         raise SpecError(f"{where}.method: у связи-измерения одно из {sorted(LINK_METHODS)}")
     if kind != "metric" and method is not None:
         raise SpecError(f"{where}.method: метод только у связи-измерения (kind: metric)")
-    if kind == "process" and source == OUTPUT:
-        raise SpecError(f"{where}: технологическая связь — между оборудованием, не от выпуска")
-    return Link(source, target, kind, method, item.get("say"))
+    say = item.get("say")
+    name = by_key[target].name
+    if say is not None and _area_name(name) not in _area_name(say):
+        raise SpecError(f"{where}.say: в реплике нет названия «{name}» из ведомости — по нему помощник узнаёт "
+                        "узел; назовите оборудование дословно, в именительном падеже")
+    return Link(source, target, kind, method, say)
 
 
 def _links(raw: Any, equipment: list[Equipment], circuits: list[dict[str, Any]]) -> list[Link]:
-    """Связи из спецификации; без поля `links` — по профилям и участкам (`default_links`)."""
+    """Связи из спецификации; без поля `links` — по профилям и участкам (`default_links`).
+
+    Связи из спецификации проверяются правилами модели (`link_problem`): то, что черновик агента отклонит,
+    в разговор не попадает."""
     if raw is None:
         return default_links(equipment, circuits)
     if not isinstance(raw, list):
         raise SpecError("links: ожидается список")
-    keys = {e.key for e in equipment}
-    found = [_link_from(item, f"links[{i}]", keys) for i, item in enumerate(raw)]
+    by_key = {e.key: e for e in equipment}
+    found = []
+    for i, item in enumerate(raw):
+        link = _link_from(item, f"links[{i}]", by_key)
+        problem = link_problem(link, by_key, has_circuits=bool(circuits))
+        if problem:
+            raise SpecError(f"links[{i}] ({link.source} → {link.target}): {problem}")
+        found.append(link)
     pairs = [(link.source, link.target) for link in found]
     if len(pairs) != len(set(pairs)):
         raise SpecError("links: связь между одной парой — один раз")
     return found
 
 
-def default_links(equipment: list[Equipment], circuits: list[dict[str, Any]]) -> list[Link]:
-    """Связи по участкам: технологическое оборудование — от выпуска, остальное — в окне процесса участка.
+def _end(key: str, by_key: dict[str, Equipment], target: Equipment) -> tuple[str, str | None, str]:
+    """Вид, контур и название конца связи. Связь от выпуска идёт от драйвера контура цели, как у агента."""
+    if key == OUTPUT:
+        return "driver", target.circuit, "выпуск"
+    e = by_key[key]
+    return PROFILE_KINDS[e.profile], e.circuit, f"{e.key} ({_lower(e.name)})"
 
-    Участки идут по порядку `circuits`: продукт с участка переходит на следующий. Вспомогательное
-    оборудование вне участка (компрессоры, ККБ, освещение) связей не получает: их агент предложит сам по
-    данным датчиков. Нужны другие связи — их задают полем `links`.
+
+def link_problem(link: Link, by_key: dict[str, Equipment], *, has_circuits: bool) -> str | None:
+    """Почему правила модели (`LINK_RULES`) не примут связь; `None` — примут.
+
+    Проверки — как `link_rule_problems` агента: пара видов, общий контур концов, контур у цели связи от
+    выпуска, вид связи и метод из строки таблицы. Методы класса цели генератор не сверяет: у оборудования
+    из каталога они от класса каталога, а не от профиля (азотная станция — профиль `shift_system`, класс
+    каталога с `window_const`)."""
+    target = by_key[link.target]
+    src_kind, src_circuit, src_title = _end(link.source, by_key, target)
+    dst_kind, dst_title = PROFILE_KINDS[target.profile], f"{target.key} ({_lower(target.name)})"
+    pair = f"{_KIND_TITLE[src_kind]} → {_KIND_TITLE[dst_kind]}"
+    rule = LINK_RULES.get((src_kind, dst_kind))
+    if rule is None:
+        if (src_kind, dst_kind) == ("system", "process"):
+            return (f"обратная связь {pair}: процесс объясняет систему, а не наоборот — нужна связь "
+                    f"{link.target} → {link.source}")
+        if src_kind == "driver":
+            return (f"от выпуска связь идёт только к технологическому оборудованию (профиль process), а у "
+                    f"{dst_title} профиль {target.profile}: свяжите его с процессом его контура")
+        return (f"связь {pair} правилами модели не предусмотрена; допустимы выпуск → процесс и процесс → система. "
+                "Что продукт идёт с участка на участок, скажите репликой в `call_notes`, без связи")
+    if rule.needs_circuit and has_circuits and target.circuit is None:
+        return (f"у {dst_title} нет контура, а в модели контуры есть: регрессии по выпуску у него не будет — "
+                "поставьте ему `circuit`")
+    if not rule.any_circuit and src_circuit != target.circuit and (
+            rule.own_circuit or (src_circuit and target.circuit)):
+        where = ", ".join(f"{title}: {circuit or 'без контура'}"
+                          for title, circuit in ((src_title, src_circuit), (dst_title, target.circuit)))
+        return f"узлы в разных контурах ({where}), связей между контурами нет — поставьте их в один контур"
+    if link.kind not in rule.kinds:
+        return f"для связи {pair} вид связи: {', '.join(rule.kinds)}"
+    if link.kind == "metric" and link.method not in rule.methods:
+        return f"для связи {pair} метод: {', '.join(rule.methods)}"
+    return None
+
+
+def default_links(equipment: list[Equipment], circuits: list[dict[str, Any]]) -> list[Link]:
+    """Связи по участкам по правилам модели: технологическое оборудование — от выпуска, системы — от
+    процесса своего участка.
+
+    Технологическое оборудование без счётчика связи не получает: процесс → процесс правила модели не
+    принимают, а связь от выпуска — измерение. Вспомогательное оборудование вне участка (компрессоры, ККБ,
+    освещение) связей тоже не получает: их агент предложит сам по данным датчиков. Нужны другие связи —
+    их задают полем `links`.
     """
     found: list[Link] = []
-    previous: Equipment | None = None
     for circuit in circuits:
         members = [e for e in equipment if e.circuit == circuit["key"] and e.in_inventory]
         lead = next((e for e in members if e.profile == "process" and e.metered), None)
         if lead is None:
             continue
         found.append(Link(OUTPUT, lead.key, "metric", "regression"))
-        if previous is not None:
-            found.append(Link(previous.key, lead.key, "process"))
         for e in members:
-            if e is lead:
+            if e is lead or (e.profile == "process" and not e.metered):
                 continue
-            if not e.metered:
-                found.append(Link(lead.key, e.key, "unmeasured"))
-            elif e.profile == "process":
+            if e.profile == "process":
                 found.append(Link(OUTPUT, e.key, "metric", "regression"))
+            elif not e.metered:
+                found.append(Link(lead.key, e.key, "unmeasured"))
             else:
-                found.append(Link(lead.key, e.key, "metric", "window"))
-        previous = lead
+                found.append(Link(lead.key, e.key, "metric", _system_method(e.profile)))
     return found
+
+
+def _system_method(profile: str) -> str:
+    """Метод связи процесс → система: первый из методов класса по профилю, который допускает правило."""
+    allowed = LINK_RULES[("process", "system")].methods
+    return next(m for m in PROFILE_LINK_METHODS[profile] if m in allowed)
 
 
 def _last_full_month_end(today: date) -> date:
@@ -1313,8 +1422,8 @@ def _target_area(link: Link, by_key: dict[str, Equipment], areas: list[Area]) ->
 
 def link_line(link: Link, by_key: dict[str, Equipment], product: dict[str, Any],
               areas: list[Area] | None = None) -> str:
-    """Как технолог говорит о связи. Название из ведомости стоит в именительном падеже: склонять его
-    генератор не умеет, а агенту нужно узнать узел."""
+    """Как технолог говорит о связи. Название цели из ведомости стоит в реплике дословно, в именительном
+    падеже: склонять его генератор не умеет, а агенту нужно узнать узел (`say` проверяет `_link_from`)."""
     if link.say:
         return link.say
     target = by_key[link.target].name
@@ -1324,13 +1433,14 @@ def link_line(link: Link, by_key: dict[str, Equipment], product: dict[str, Any],
         return (f"{target}: потребление идёт {whose} — больше {area.unit if area else product['unit']} за день, "
                 "больше и берёт, без выпуска простаивает.")
     source = _lower(by_key[link.source].name)
-    if link.kind == "process":
-        return f"Продукт идёт по цепочке: сначала {source}, потом {_lower(target)}."
     if link.kind == "unmeasured":
         return f"{target} включается, когда работает {source}; своего счётчика нет, сидит на общем."
     if link.method == "window_const":
         return (f"{target} включаем, только когда работает {source}; нагрузка ровная, "
                 "от объёма почти не зависит.")
+    if link.method == "regression":
+        return (f"{target} нагружается следом за процессом ({source}): чем плотнее работает процесс, "
+                "тем больше берёт.")
     return f"{target} включаем, только когда работает {source}; остановились — можно выключать."
 
 
@@ -1485,9 +1595,16 @@ def write_telemetry(spec: Spec, sim: Simulation, folder: Path,
     return [{k: v for k, v in d.items() if k != "series"} for d in devices]
 
 
-LINK_KIND_TITLES = {"metric": "измерение", "process": "технологическая", "unmeasured": "без измерения"}
+LINK_KIND_TITLES = {"metric": "измерение", "unmeasured": "без измерения"}
 LINK_METHOD_TITLES = {"regression": "от выпуска", "window": "в окне процесса",
                       "window_const": "в окне, постоянная нагрузка"}
+
+
+def _method_title(link: Link) -> str:
+    """Метод связи словами; регрессия от процесса — не «от выпуска»."""
+    if link.method == "regression" and link.source != OUTPUT:
+        return "от загрузки процесса"
+    return LINK_METHOD_TITLES.get(link.method or "", "—")
 
 
 def _resource_rub(spec: Spec, resource: str, volume: float) -> float:
@@ -1669,7 +1786,7 @@ def write_answers(spec: Spec, sim: Simulation, bills_: list[Bill], path: Path,
                   "| Откуда | Куда | Вид | Метод |", "|---|---|---|---|",
                   *[f"| {_link_end(link, by_key, spec.areas)} | {by_key[link.target].name} "
                     f"| {LINK_KIND_TITLES[link.kind]} "
-                    f"| {LINK_METHOD_TITLES.get(link.method or '', '—')} |" for link in spec.links]]
+                    f"| {_method_title(link)} |" for link in spec.links]]
     lines += area_answers(spec, sim)
     resource_lines, resource_findings = resource_answers(spec, sim, series or {}, rbills or {})
     lines += resource_lines
@@ -1714,32 +1831,31 @@ def _how_to_tail(step: int) -> str:
 HOW_TO = _HOW_TO_HEAD + _HOW_TO_ALL + _how_to_tail(4)
 
 #: Папка отчётов о выпуске при участках: их прикладывают вторым сообщением, когда контуры уже в модели.
-#: Выпуск, разобранный раньше контуров, агент складывает в выпуск объекта («по зонам не разнесено»).
+#: Разбор видит контуры действующей модели и черновика своего хода, но не открытых карточек прошлых ходов:
+#: выпуск, разобранный в другом ходе до подтверждения контуров, уйдёт на объект или в вопрос «к какому
+#: контуру». Большой пакет в один ход не укладывается, а порядок файлов в ходе не задан — поэтому вторым.
 PRODUCTION_LATER = "выпуск_вторым_сообщением"
 
 
 def _area_steps(spec: Spec) -> str:
-    """Шаги 2–5 при участках: документы без отчётов о выпуске, оборудование по участкам, затем отчёты о выпуске.
+    """Шаги 2–4 при участках: документы без отчётов о выпуске, подтверждение модели, затем отчёты о выпуске.
 
-    При разборе агент не относит оборудование к контурам, а без этого удельный по контурам пуст (стенд 14.11).
-    """
+    Оборудование по контурам и окна контуров разбор ставит сам — по таблице «Контур — основное оборудование»
+    и графикам участков в описании объекта (агент, docs#678 срез I)."""
     titles = ", ".join(f"«{area.title}»" for area in spec.areas)
     return f"""2. В чат помощника приложите все файлы из папки `upload/`, КРОМЕ папки `upload/{PRODUCTION_LATER}/`,
    и напишите «Разбери документы и заполни проект». Отчёты о выпуске пока не прикладывайте: выпуск
-   разносится по контурам модели, а контуров в ней ещё нет.
+   разносится по контурам модели, а контуры появятся в ней, когда вы подтвердите карточку.
 3. Дождитесь распознавания (1–5 минут) и проверьте карточки предложений: параметры объекта,
-   энергомодель с контурами {titles}, оборудование, ряды по счетам. Связи, которые технолог проговорил
-   в разговоре, лежат в той же карточке «Оборудование и учёт», что и узлы, с цитатой из разговора.
-   Нажмите «Подтвердить».
-4. Отнесите оборудование к участкам — без этого удельный расход по контурам останется пустым. Напишите:
-   «Отнеси оборудование к контурам по описанию объекта: что на каком участке работает».
-   Подтвердите карточку: у каждого узла участка появится его контур.
-5. Только после этого приложите вторым сообщением оба файла из `upload/{PRODUCTION_LATER}/`
+   энергомодель с контурами {titles},
+   окна работы контуров, оборудование — у каждого узла участка его контур из описания объекта,
+   ряды по счетам. Связи, которые технолог проговорил в разговоре, лежат в той же карточке
+   «Оборудование и учёт», что и узлы, с цитатой из разговора. Нажмите «Подтвердить».
+4. После этого приложите вторым сообщением оба файла из `upload/{PRODUCTION_LATER}/`
    (`05_Отчёт_о_выпуске_по_месяцам.xlsx` и `06_Суточный_выпуск.xlsx`) и напишите:
    «Вот отчёты о выпуске по участкам, разнеси выпуск по контурам».
-   Подтвердите карточку выпуска: в ней выпуск каждого контура (колонка «{AREA_COLUMN}») и окна
-   работы контуров из разговора с технологом. Если окон в карточке нет, напишите:
-   «Поставь окна работы контуров по графикам участков из разговора с технологом».
+   Подтвердите карточку выпуска: в ней выпуск каждого контура (колонка «{AREA_COLUMN}»). Если у контуров
+   нет окон работы, напишите: «Поставь окна работы контуров по графикам участков из разговора с технологом».
 """
 
 
@@ -1747,7 +1863,7 @@ def how_to(spec: Spec) -> str:
     """`КАК ЗАГРУЗИТЬ.md`: без участков — все документы одним сообщением, при участках — выпуск вторым."""
     if not spec.areas:
         return HOW_TO + resource_how_to(spec)
-    return _HOW_TO_HEAD + _area_steps(spec) + _how_to_tail(6) + resource_how_to(spec, 8)
+    return _HOW_TO_HEAD + _area_steps(spec) + _how_to_tail(5) + resource_how_to(spec, 7)
 
 
 def resource_how_to(spec: Spec, step: int = 6) -> str:

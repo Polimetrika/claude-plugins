@@ -1,0 +1,388 @@
+{
+  "seed": 674,
+  "object": {
+    "name": "Завод железобетонных изделий «Прибрежный»",
+    "company": "ООО «Прибрежный комбинат ЖБИ»",
+    "address": "Московская обл., г.о. Солнечногорск, промзона «Восточная», ул. Заводская, 4",
+    "area_m2": 12400,
+    "timezone": "Europe/Moscow",
+    "climate_zone": "II В",
+    "assortment": "Плиты перекрытия, фундаментные блоки, кольца колодцев, перемычки, лотки",
+    "shifts": {
+      "title": "2 смены, 07:00–23:00, пн–пт",
+      "start_hour": 7,
+      "end_hour": 23,
+      "weekdays": [
+        0,
+        1,
+        2,
+        3,
+        4
+      ]
+    },
+    "description": "Полный цикл: приготовление бетонной смеси на собственном БСУ, изготовление арматурных каркасов, формовка с виброуплотнением и тепловлажностная обработка в пропарочных камерах. Пар на камеры — от собственной газовой котельной, отопление корпусов — от городской тепловой сети, сжатый воздух — от компрессорной."
+  },
+  "supply": {
+    "supplier": "АО «Энергосбыт Прибрежье»",
+    "contract_number": "50-2214-ЭС",
+    "max_power_kw": 600,
+    "tariff_rub_per_kwh": 8.95,
+    "tariff_category": 1,
+    "supply_points": [
+      "РУ-0,4 кВ ТП-27 (главный корпус)",
+      "РУ-0,4 кВ ТП-28 (БСУ и котельная)"
+    ]
+  },
+  "product": {
+    "title": "Изделия железобетонные",
+    "unit": "т",
+    "daily_min": 270,
+    "daily_max": 360
+  },
+  "circuits": [
+    {
+      "key": "concrete",
+      "title": "Бетоносмесительный узел",
+      "driver_unit": "т",
+      "daily_min": 260,
+      "daily_max": 350,
+      "shifts": {
+        "title": "2 смены, 07:00–23:00, пн–пт",
+        "start_hour": 7,
+        "end_hour": 23,
+        "weekdays": [
+          0,
+          1,
+          2,
+          3,
+          4
+        ]
+      }
+    },
+    {
+      "key": "rebar",
+      "title": "Арматурный цех",
+      "driver_unit": "т",
+      "daily_min": 20,
+      "daily_max": 30,
+      "shifts": {
+        "title": "1 смена, 08:00–17:00, пн–пт",
+        "start_hour": 8,
+        "end_hour": 17,
+        "weekdays": [
+          0,
+          1,
+          2,
+          3,
+          4
+        ]
+      }
+    },
+    {
+      "key": "molding",
+      "title": "Формовочный цех",
+      "driver_unit": "т",
+      "daily_min": 270,
+      "daily_max": 360,
+      "shifts": {
+        "title": "2 смены, 07:00–23:00, пн–пт",
+        "start_hour": 7,
+        "end_hour": 23,
+        "weekdays": [
+          0,
+          1,
+          2,
+          3,
+          4
+        ]
+      }
+    }
+  ],
+  "equipment": [
+    {
+      "key": "mixer",
+      "name": "Бетоносмеситель двухвальный",
+      "model": "БП-2Г-1500",
+      "count": 2,
+      "rated_kw": 55,
+      "profile": "process",
+      "load": 0.6,
+      "idle": 0.0,
+      "location": "БСУ",
+      "circuit": "concrete"
+    },
+    {
+      "key": "conveyor",
+      "name": "Конвейер ленточный подачи инертных",
+      "model": "КЛ-800",
+      "count": 1,
+      "rated_kw": 22,
+      "profile": "process",
+      "load": 0.65,
+      "idle": 0.0,
+      "location": "БСУ",
+      "circuit": "concrete"
+    },
+    {
+      "key": "aspiration",
+      "name": "Аспирация БСУ",
+      "model": "ЦН-15 + ВЦ 14-46",
+      "count": 1,
+      "rated_kw": 11,
+      "profile": "shift_system",
+      "load": 0.75,
+      "idle": 0.0,
+      "location": "БСУ",
+      "circuit": "concrete",
+      "metered": false
+    },
+    {
+      "key": "straightener",
+      "name": "Правильно-отрезной автомат",
+      "model": "И-6118",
+      "count": 1,
+      "rated_kw": 18.5,
+      "profile": "process",
+      "load": 0.6,
+      "idle": 0.0,
+      "location": "Арматурный цех",
+      "circuit": "rebar"
+    },
+    {
+      "key": "welder",
+      "name": "Машина контактной точечной сварки",
+      "model": "МТ-2202",
+      "count": 2,
+      "rated_kw": 75,
+      "profile": "process",
+      "load": 0.35,
+      "idle": 0.0,
+      "location": "Арматурный цех",
+      "circuit": "rebar"
+    },
+    {
+      "key": "vibro",
+      "name": "Виброплощадка",
+      "model": "СМЖ-200Г",
+      "count": 2,
+      "rated_kw": 30,
+      "profile": "process",
+      "load": 0.55,
+      "idle": 0.0,
+      "location": "Формовочный цех",
+      "circuit": "molding"
+    },
+    {
+      "key": "crane",
+      "name": "Кран мостовой электрический",
+      "model": "КМ 10 т",
+      "count": 2,
+      "rated_kw": 30,
+      "profile": "process",
+      "load": 0.25,
+      "idle": 0.0,
+      "location": "Формовочный цех",
+      "circuit": "molding"
+    },
+    {
+      "key": "steam_chamber",
+      "name": "Пропарочная камера (циркуляционные вентиляторы и автоматика)",
+      "model": "ЯПК-8",
+      "count": 8,
+      "rated_kw": 3,
+      "profile": "constant",
+      "load": 0.5,
+      "idle": 0.5,
+      "location": "Формовочный цех"
+    },
+    {
+      "key": "compressor",
+      "name": "Компрессор винтовой",
+      "model": "ВК-37",
+      "count": 2,
+      "rated_kw": 37,
+      "profile": "shift_system",
+      "load": 0.65,
+      "idle": 0.0,
+      "location": "Компрессорная",
+      "circuit": "concrete"
+    },
+    {
+      "key": "boiler_pump",
+      "name": "Насос питательный котельной",
+      "model": "ЦНСГ 13-140",
+      "count": 3,
+      "rated_kw": 15,
+      "profile": "constant",
+      "load": 0.6,
+      "idle": 0.6,
+      "location": "Газовая котельная"
+    },
+    {
+      "key": "ventilation",
+      "name": "Приточная установка ПВ-1",
+      "model": "КЦКП-25",
+      "count": 1,
+      "rated_kw": 18.5,
+      "profile": "ventilation",
+      "load": 0.8,
+      "idle": 0.15,
+      "location": "Венткамера формовочного цеха"
+    },
+    {
+      "key": "lighting",
+      "name": "Освещение цехов",
+      "model": "LED 200 Вт",
+      "count": 1,
+      "rated_kw": 40,
+      "profile": "lighting",
+      "load": 0.9,
+      "idle": 0.1,
+      "location": "Цеха"
+    },
+    {
+      "key": "air_curtain",
+      "name": "Тепловая завеса ворот формовочного цеха",
+      "model": "КЭВ-24П",
+      "count": 2,
+      "rated_kw": 24,
+      "profile": "heating",
+      "load": 0.6,
+      "idle": 0.0,
+      "location": "Ворота формовочного цеха",
+      "in_inventory": false,
+      "metered": false
+    }
+  ],
+  "links": [
+    {
+      "from": "output",
+      "to": "mixer",
+      "kind": "metric",
+      "method": "regression"
+    },
+    {
+      "from": "output",
+      "to": "conveyor",
+      "kind": "metric",
+      "method": "regression"
+    },
+    {
+      "from": "mixer",
+      "to": "aspiration",
+      "kind": "unmeasured",
+      "say": "Аспирация БСУ включается вместе с бетоносмесителями, своего счётчика у неё нет."
+    },
+    {
+      "from": "output",
+      "to": "straightener",
+      "kind": "metric",
+      "method": "regression"
+    },
+    {
+      "from": "output",
+      "to": "welder",
+      "kind": "metric",
+      "method": "regression"
+    },
+    {
+      "from": "output",
+      "to": "vibro",
+      "kind": "metric",
+      "method": "regression"
+    },
+    {
+      "from": "output",
+      "to": "crane",
+      "kind": "metric",
+      "method": "regression"
+    },
+    {
+      "from": "mixer",
+      "to": "compressor",
+      "kind": "metric",
+      "method": "window",
+      "say": "Компрессор винтовой даёт воздух на пневмозатворы дозаторов БСУ и на обдув форм. Нет замесов — сжатый воздух не нужен, компрессоры можно глушить."
+    }
+  ],
+  "anomalies": [
+    {
+      "type": "off_shift",
+      "equipment": "compressor",
+      "share": 0.3,
+      "title": "Компрессоры работают вне смены (утечки сжатого воздуха)",
+      "hint": "По ночам в формовочном слышно, как шипит воздух, а {name} в компрессорной, по-моему, вообще не останавливается."
+    },
+    {
+      "type": "unit_overconsumption",
+      "equipment": "boiler_pump",
+      "unit": 3,
+      "extra": 0.35,
+      "title": "Насос питательный котельной №3 потребляет на 35 % больше остальных (износ проточной части)",
+      "hint": "{name} №{unit} шумит сильнее остальных, на ТО говорили, что пора чистить."
+    },
+    {
+      "type": "no_night_setback",
+      "equipment": "ventilation",
+      "title": "Приточная установка ПВ-1 работает ночью и в выходные как в смену",
+      "hint": "{name} гоняем круглосуточно, ночного режима у неё нет, так и не настроили."
+    },
+    {
+      "type": "water_leak",
+      "resource": "water",
+      "lph": 450,
+      "days": 21,
+      "title": "Утечка воды на вводе: ночной расход не падает"
+    }
+  ],
+  "resources": {
+    "gas": {
+      "supplier": "ООО «Прибрежьегаз»",
+      "contract_number": "Г-0417/26",
+      "tariff_rub_per_1000m3": 8650,
+      "process_m3_per_unit": 9.0,
+      "meter": "СГ-16МТ-250",
+      "meter_location": "ГРПШ газовой котельной",
+      "circuit": "molding"
+    },
+    "heat": {
+      "supplier": "ООО «Теплосеть Прибрежье»",
+      "contract_number": "Т-2291/26",
+      "tariff_rub_per_gcal": 2450,
+      "heating_peak_gcal_h": 0.9,
+      "meter": "ВКТ-7",
+      "meter_location": "ИТП главного корпуса"
+    },
+    "water": {
+      "supplier": "МУП «Водоканал Прибрежье»",
+      "contract_number": "В-1188",
+      "tariff_rub_per_m3": 48.5,
+      "wastewater_tariff_rub_per_m3": 41.0,
+      "process_m3_per_unit": 0.12,
+      "domestic_m3_per_work_day": 14,
+      "wastewater_share": 0.55,
+      "meter": "ВСХНд-50",
+      "meter_location": "Водомерный узел ввода",
+      "circuit": "concrete"
+    }
+  },
+  "call_notes": [
+    "Бетон с БСУ идёт на формовку, туда же из арматурного цеха идут готовые каркасы — на виброплощадки.",
+    "Пропарка идёт ночью, после второй смены: пар на камеры даёт газовая котельная, по электричеству там только вентиляторы и автоматика.",
+    "Котельная у нас только под пар на камеры, круглый год. Корпуса отапливаются от городской тепловой сети, узел учёта тепла стоит в ИТП главного корпуса.",
+    "Насосов в котельной три, в работе обычно все, один формально резервный.",
+    "Зимой на воротах формовочного цеха включаем две тепловые завесы по 24 кВт, их в ведомость, кажется, так и не внесли.",
+    "Второй бетоносмеситель включаем, когда идут плиты перекрытия большими партиями.",
+    "Вода уходит в замес и на пропарку, в канализацию идёт примерно половина — остальное остаётся в изделиях."
+  ],
+  "period": {
+    "end": "2026-11-13",
+    "bill_months": 13,
+    "telemetry_days": 60
+  },
+  "climate": {
+    "t_mean": 6,
+    "t_amp": 14,
+    "t_day_amp": 4
+  }
+}
