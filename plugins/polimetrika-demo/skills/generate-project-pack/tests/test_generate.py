@@ -1,5 +1,5 @@
 """Тесты генератора демо-пакета: совместимость без участков, выпуск, график и ресурсы по участкам, связи
-по правилам модели.
+по правилам модели, счётчик электроэнергии на вводе.
 
 Запуск из корня репозитория: `pytest plugins/polimetrika-demo/skills/generate-project-pack/tests`.
 Нужны openpyxl, python-docx; reportlab — по желанию (без него счета выходят в DOCX, на тесты это не влияет).
@@ -12,8 +12,11 @@ import hashlib
 import importlib.util
 import json
 import os
+import re
 import sys
 from collections import defaultdict
+from datetime import datetime
+from itertools import pairwise
 from pathlib import Path
 
 import docx
@@ -35,7 +38,8 @@ def _module(path: Path):
 #: `GENERATE_PY` — другой файл генератора: так считались эталонные отпечатки ниже.
 gen = _module(Path(os.environ.get("GENERATE_PY", SKILL / "scripts" / "generate.py")))
 
-#: Отпечатки пакета 0.4.0 на `fixtures/no-circuits.json`: без контуров и с одним контуром.
+#: Отпечатки пакета 0.4.0 на `fixtures/no-circuits.json`: без контуров и с одним контуром. 0.5.0 без `supply.meter`
+#: пакет не меняет — счётчик на вводе только по полю.
 GOLDEN = {
     "no_circuits": "9a17ac960765b440df3613c9ea16704eeaf981b37c9be2fa8b0e0cf1905348a9",
     "one_circuit": "ab45be073d0ff3a124c0cb5362910816ee26860e3e5aa8e1b65a271604249f5a",
@@ -435,3 +439,166 @@ def test_examples_pass_link_rules() -> None:
     for name in ("coffee-roastery.json", "asphalt-plant.json"):
         spec = gen.load_spec(SKILL / "examples" / name)
         assert spec.links and all(link.kind != "process" for link in spec.links)
+
+
+# --- Счётчик электроэнергии на вводе ---------------------------------------------------------------------
+
+
+def _with_input_meter(raw: dict, meter: str = "Меркурий 234") -> dict:
+    raw = copy.deepcopy(raw)
+    raw["supply"]["meter"] = meter
+    return raw
+
+
+@pytest.fixture(scope="module")
+def zhbi_input(tmp_path_factory: pytest.TempPathFactory):
+    """Эталон ЖБИ со счётчиком на вводе: две точки поставки, оборудование без приборов, окно показаний 60 суток
+    через границу месяцев."""
+    folder = tmp_path_factory.mktemp("zhbi-input")
+    spec = _load(_with_input_meter(_zhbi_raw()), folder)
+    out = folder / "pack"
+    gen.build(spec, out)
+    return spec, gen.simulate(spec), out
+
+
+def _number(text: str) -> float:
+    return float(text.replace(" ", "").replace(",", "."))
+
+
+def _readings(out: Path) -> dict[str, list[tuple[str, float, float]]]:
+    """Общий файл показаний ЭЭ: прибор → [(время, кВт, показание кВт·ч)] по порядку строк."""
+    found: dict[str, list[tuple[str, float, float]]] = defaultdict(list)
+    lines = (out / "telemetry" / "показания_приборов_учёта.csv").read_text(encoding="utf-8").splitlines()
+    for line in lines[1:]:
+        device, ts, kw, kwh = line.split(";")
+        found[device].append((ts, _number(kw), _number(kwh)))
+    return found
+
+
+def test_input_series_is_metered_plus_unmetered_plus_other(zhbi_input) -> None:
+    spec, sim, out = zhbi_input
+    power = gen.input_power(sim)
+    assert all(power[i] == pytest.approx(sum(s[i] for s in sim.units.values()) + sim.other[i], abs=1e-9)
+               for i in range(len(sim.hours)))
+    # По файлу показаний, каждый час окна: ввод = приборы оборудования + оборудование без прибора + база и потери.
+    readings = _readings(out)
+    vvod = readings.pop(gen.INPUT_DEVICE)
+    first = len(sim.hours) - 24 * spec.telemetry_days
+    assert len(vvod) == 24 * spec.telemetry_days
+    hidden = [f"{e.key}#{n}" for e in spec.equipment if not e.metered for n in range(1, e.count + 1)]
+    assert hidden  # аспирация и завеса — без приборов
+    for k, (ts, kw, _) in enumerate(vvod):
+        i = first + k
+        assert ts == sim.hours[i].ts.strftime("%d.%m.%Y %H:%M")
+        seen = sum(rows[k][1] for rows in readings.values())
+        unseen = sum(sim.units[key][i] for key in hidden) + sim.other[i]
+        assert kw == pytest.approx(seen + unseen, abs=0.005 * (len(readings) + 1))
+    # Показание — нарастающий итог мощности.
+    assert all(b[2] - a[2] == pytest.approx(b[1], abs=0.1) for a, b in pairwise(vvod))
+
+
+def test_input_month_matches_bill(zhbi_input) -> None:
+    spec, sim, out = zhbi_input
+    bills = {(b.year, b.month): b.kwh for b in gen.bills(spec, sim)}
+    by_month: dict[tuple[int, int], float] = defaultdict(float)
+    hours: dict[tuple[int, int], int] = defaultdict(int)
+    for hour, kw in zip(sim.hours, gen.input_power(sim)):
+        by_month[(hour.ts.year, hour.ts.month)] += kw
+        hours[(hour.ts.year, hour.ts.month)] += 1
+    assert len(bills) == spec.bill_months
+    assert {key: round(kwh) for key, kwh in by_month.items()} == bills
+    # По файлу: месяц, все часы которого попали в окно показаний, сходится со счётом с точностью округления
+    # кВт до сотых. В окне 60 суток до 13.11 таких месяцев два: октябрь целиком и неполный ноябрь (как и счёт).
+    csv_month: dict[tuple[int, int], list[float]] = defaultdict(list)
+    for ts, kw, _ in _readings(out)[gen.INPUT_DEVICE]:
+        day = datetime.strptime(ts, "%d.%m.%Y %H:%M")
+        csv_month[(day.year, day.month)].append(kw)
+    full = [key for key, values in csv_month.items() if len(values) == hours[key]]
+    assert full == [(2026, 10), (2026, 11)]
+    for key in full:
+        assert sum(csv_month[key]) == pytest.approx(bills[key], abs=0.005 * hours[key] + 0.5)
+
+
+def test_input_meter_in_inventory_and_device_list(zhbi_input) -> None:
+    spec, _, out = zhbi_input
+    point = spec.supply["supply_points"][0]
+    node = f"Счётчик на вводе {point}"
+    (_, inventory), = _xlsx(out / "upload" / "03_Ведомость_оборудования.xlsx")
+    names = [row[0] for row in inventory[4:]]
+    # Ввод — первой строкой узлов учёта, перед вводами газа, тепла и воды; без мощности, как они.
+    assert names[-4:] == [node, "Узел учёта газа", "Узел учёта тепла (ИТП)", "Водомер на вводе"]
+    assert inventory[4:][-4] == [node, "Меркурий 234", 1, None, point]
+    (_, devices), = _xlsx(out / "telemetry" / "перечень_приборов_учёта.xlsx")
+    assert [gen.INPUT_DEVICE, "Меркурий 234", node, point] in devices
+    # Агент относит строку к классу «Ввод» по синониму «счётчик на вводе» подряд (`match_class`), а прибор —
+    # к узлу по словам имени (`match_node`): «vvod» есть у синонима «ввод» класса и нет у оборудования.
+    assert "счётчик на вводе" in node.lower()
+    assert {w for w in re.split(r"[^a-z0-9]+", gen.INPUT_DEVICE) if len(w) >= 3} == {"vvod"}
+    assert not any("vvod" in e.key or "ввод" in e.name.lower() for e in spec.equipment)
+
+
+def test_input_meter_location_from_spec(tmp_path: Path) -> None:
+    raw = _with_input_meter(_raw("no-circuits.json"))
+    raw["supply"]["meter_location"] = "Электрощитовая"
+    spec = _load(raw, tmp_path)
+    assert gen.input_meter(spec) == {"device": "ee-vvod-1", "node": f"Счётчик на вводе {gen.supply_point(spec)}",
+                                     "model": "Меркурий 234", "location": "Электрощитовая"}
+
+
+def test_summary_visible_share(zhbi_input) -> None:
+    spec, _, out = zhbi_input
+    seen = json.loads((out / "summary.json").read_text(encoding="utf-8"))["input_meter"]
+    assert seen["device"] == gen.INPUT_DEVICE and seen["days"] == spec.telemetry_days
+    assert 0.75 <= seen["visible_share"] <= 0.95
+    assert seen["visible_share"] == pytest.approx(seen["metered_kwh"] / seen["input_kwh"], abs=0.001)
+    invisible = {item["title"]: item for item in seen["invisible"]}
+    assert set(invisible) == {"Аспирация БСУ", "Тепловая завеса ворот формовочного цеха", gen.OTHER_TITLE}
+    assert seen["metered_kwh"] + sum(item["kwh"] for item in invisible.values()) == pytest.approx(
+        seen["input_kwh"], abs=len(invisible) + 1)
+    by_hour = seen["visible_share_by_hour"]
+    # Ночью оборудование стоит, а база и потери идут: доля видимого ночью ниже, чем днём.
+    assert len(by_hour) == 24 and max(by_hour[0:6]) < min(by_hour[9:17])
+    answers = (out / "ЧТО ЗАЛОЖЕНО.md").read_text(encoding="utf-8")
+    assert "## Счётчик на вводе" in answers
+    assert f"видят {gen._pct(seen['visible_share'])} потребления ввода" in answers
+    assert all(f"| {title} |" in answers for title in invisible)
+    assert "Счётчик один, на точке поставки из счетов" in answers  # у эталона две точки поставки
+    how = (out / "КАК ЗАГРУЗИТЬ.md").read_text(encoding="utf-8")
+    assert f"Счётчик на вводе `{gen.INPUT_DEVICE}` — в том же файле" in how
+    steps = [int(line.split(".")[0]) for line in how.splitlines() if line[:1].isdigit()]
+    assert steps == list(range(1, len(steps) + 1))
+
+
+@pytest.mark.parametrize("name", ["no-circuits.json", "zhbi-pribrezhny.json"])
+def test_no_input_meter_without_field(name: str, tmp_path: Path) -> None:
+    spec = _load(_raw(name), tmp_path)
+    out = tmp_path / "pack"
+    gen.build(spec, out)
+    assert gen.INPUT_DEVICE not in _readings(out)
+    (_, inventory), = _xlsx(out / "upload" / "03_Ведомость_оборудования.xlsx")
+    assert not any(str(row[0]).startswith("Счётчик на вводе") for row in inventory)
+    (_, devices), = _xlsx(out / "telemetry" / "перечень_приборов_учёта.xlsx")
+    assert not any(row[0] == gen.INPUT_DEVICE for row in devices)
+    assert "input_meter" not in json.loads((out / "summary.json").read_text(encoding="utf-8"))
+    assert "## Счётчик на вводе" not in (out / "ЧТО ЗАЛОЖЕНО.md").read_text(encoding="utf-8")
+    assert gen.INPUT_DEVICE not in (out / "КАК ЗАГРУЗИТЬ.md").read_text(encoding="utf-8")
+
+
+def test_input_meter_keeps_equipment_readings(zhbi_input, tmp_path: Path) -> None:
+    """Счётчик на вводе дописывается в конец файла: показания приборов оборудования те же, что без него."""
+    _, _, out = zhbi_input
+    spec = _load(_zhbi_raw(), tmp_path)
+    gen.build(spec, tmp_path / "pack")
+    without = _readings(tmp_path / "pack")
+    with_input = _readings(out)
+    assert list(with_input)[-1] == gen.INPUT_DEVICE
+    with_input.pop(gen.INPUT_DEVICE)
+    assert with_input == without
+
+
+@pytest.mark.parametrize(("meter", "message"), [("", "марка счётчика на вводе строкой"),
+                                               (234, "марка счётчика на вводе строкой"),
+                                               ("Корректор ЕК-270", "без «Ирвис», «корректор», «архив»")])
+def test_input_meter_spec_errors(meter, message: str, tmp_path: Path) -> None:
+    with pytest.raises(gen.SpecError, match=message):
+        _load(_with_input_meter(_raw("no-circuits.json"), meter), tmp_path)

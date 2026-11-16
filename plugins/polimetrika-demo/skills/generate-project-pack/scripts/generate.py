@@ -6,8 +6,8 @@
 
     upload/        что приложить к чату нового проекта
     <папка>-upload.zip   та же upload/ одним архивом (рядом с папкой пакета)
-    telemetry/     почасовые показания приборов учёта (электроэнергия; газ, тепло, вода на вводах) и перечень
-                   приборов — загружаются в чат помощника
+    telemetry/     почасовые показания приборов учёта (электроэнергия по оборудованию и на вводе; газ, тепло,
+                   вода на вводах) и перечень приборов — загружаются в чат помощника
     ЧТО ЗАЛОЖЕНО.md   ответы: какие потери и аномалии спрятаны в данных
     summary.json   сводка для Claude: итоги, доли, файлы
 
@@ -199,6 +199,7 @@ def load_spec(path: Path) -> Spec:
     supply = _req(raw, "supply", "spec")
     for key in ("supplier", "contract_number", "max_power_kw", "tariff_rub_per_kwh"):
         _req(supply, key, "supply")
+    _supply_meter(supply)
     product = _req(raw, "product", "spec")
     for key in ("title", "unit", "daily_min", "daily_max"):
         _req(product, key, "product")
@@ -346,6 +347,18 @@ _RESOURCE_FIELDS = {
 #: Слова, по которым агент узнаёт суточный архив корректора газа (сильный признак типа документа). В марке
 #: прибора они уводят ведомость оборудования из инвентаризации: разрыв баллов падает, тип решает модель.
 METER_ARCHIVE_WORDS = re.compile(r"ирвис|корректор|архив")
+
+
+def _supply_meter(supply: dict[str, Any]) -> None:
+    """Марка счётчика электроэнергии на вводе (`supply.meter`): строкой и без слов архива корректора газа."""
+    meter = supply.get("meter")
+    if meter is None:
+        return
+    if not isinstance(meter, str) or not meter.strip():
+        raise SpecError("supply.meter: марка счётчика на вводе строкой, например «Меркурий 234»")
+    if METER_ARCHIVE_WORDS.search(meter.lower()):
+        raise SpecError("supply.meter: марка без «Ирвис», «корректор», «архив» — по ним ведомость распознаётся "
+                        "как архив корректора газа; например «Меркурий 234»")
 
 
 def _resources(raw: Any) -> dict[str, dict[str, Any]]:
@@ -702,11 +715,17 @@ class Bill:
         return round(self.net * (1 + self.vat), 2)
 
 
+def input_power(sim: Simulation) -> list[float]:
+    """Мощность на вводе объекта, кВт на каждый час: всё оборудование (с прибором и без) плюс неучтённая база
+    и потери. Это и счета (`monthly`), и показания счётчика на вводе (`supply.meter`)."""
+    return [sum(s[i] for s in sim.units.values()) + sim.other[i] for i in range(len(sim.hours))]
+
+
 def monthly(sim: Simulation) -> dict[tuple[int, int], float]:
     totals: dict[tuple[int, int], float] = {}
-    for i, hour in enumerate(sim.hours):
+    for hour, kw in zip(sim.hours, input_power(sim), strict=True):
         key = (hour.ts.year, hour.ts.month)
-        totals[key] = totals.get(key, 0.0) + sum(s[i] for s in sim.units.values()) + sim.other[i]
+        totals[key] = totals.get(key, 0.0) + kw
     return totals
 
 
@@ -1056,9 +1075,14 @@ def write_inventory(spec: Spec, path: Path) -> None:
         if not e.in_inventory:
             continue
         ws.append([e.name, e.model, e.count, e.rated_kw, e.location])
+    # Счётчик на вводе — узел «Ввод», а не оборудование: мощности у него нет, как у вводов газа, тепла и воды.
+    vvod = input_meter(spec)
+    if vvod:
+        ws.append([vvod["node"], vvod["model"], 1, None, vvod["location"]])
     for meter in resource_meters(spec):
         ws.append([meter["node"], meter["model"], 1, None, meter["location"]])
-    _fit_columns(ws, (38, 26, 14, 18, 28), numeric="CD")
+    # Название ввода длиннее обычного: в узкой колонке LibreOffice обрежет его по марке в соседней ячейке.
+    _fit_columns(ws, (max(38, len(vvod["node"]) + 4) if vvod else 38, 26, 14, 18, 28), numeric="CD")
     wb.save(path)
 
 
@@ -1108,6 +1132,11 @@ def _pdf_font() -> str | None:
     return None
 
 
+def supply_point(spec: Spec) -> str:
+    """Точка поставки, по которой выставляются счета: первая из договора."""
+    return (spec.supply.get("supply_points") or ["ВРУ-0,4 кВ цеха"])[0]
+
+
 def _bill_lines(spec: Spec, bill: Bill, number: int) -> tuple[list[str], list[str], list[list[str]], str]:
     s, o = spec.supply, spec.obj
     last_day = calendar.monthrange(bill.year, bill.month)[1]
@@ -1121,7 +1150,7 @@ def _bill_lines(spec: Spec, bill: Bill, number: int) -> tuple[list[str], list[st
         f"Договор энергоснабжения № {s['contract_number']}",
         f"Покупатель: {o['company']}, {o['address']}",
     ]
-    point = (s.get("supply_points") or ["ВРУ-0,4 кВ цеха"])[0]
+    point = supply_point(spec)
     header = [
         "Точка поставки", "Расчётный период", "Объём, кВт·ч",
         "Тариф без НДС, руб./кВт·ч", "Сумма без НДС, руб.", "Сумма с НДС, руб.",
@@ -1509,6 +1538,26 @@ METER_FILES = {"gas": "показания_приборов_учёта_газ.csv
                "water": "показания_приборов_учёта_вода.csv"}
 
 
+#: Счётчик электроэнергии на вводе (`supply.meter`) — прибор общего файла показаний ЭЭ. Агент привязывает прибор
+#: к узлу по словам имени (`match_node` агента): «vvod» есть только у класса «Ввод» каталога (синоним «ввод»), у
+#: оборудования его нет, поэтому привязка однозначна. Узел в ведомости — «Счётчик на вводе <точка поставки>»:
+#: синоним «счётчик на вводе» даёт строке класс ввода (`match_class`), а «Счётчик электроэнергии на вводе»
+#: с классом не совпадёт — слово «электроэнергии» разрывает синоним.
+INPUT_DEVICE = "ee-vvod-1"
+INPUT_NODE = "Счётчик на вводе {point}"
+
+
+def input_meter(spec: Spec) -> dict[str, str] | None:
+    """Счётчик электроэнергии на вводе — только с полем `supply.meter`. Один на объект: на точке поставки,
+    по которой идут счета, и считает весь объект, как счёт."""
+    model = spec.supply.get("meter")
+    if not model:
+        return None
+    point = supply_point(spec)
+    return {"device": INPUT_DEVICE, "node": INPUT_NODE.format(point=point), "model": model,
+            "location": spec.supply.get("meter_location") or point}
+
+
 def resource_meters(spec: Spec) -> list[dict[str, str]]:
     """Приборы учёта на вводах ресурсов: только у ресурсов с полем `meter` (марка прибора)."""
     meters = []
@@ -1543,11 +1592,8 @@ def write_resource_telemetry(spec: Spec, sim: Simulation, series: dict[str, Reso
     return meters
 
 
-def write_telemetry(spec: Spec, sim: Simulation, folder: Path,
-                    meters: list[dict[str, str]] | None = None) -> list[dict[str, Any]]:
-    """Почасовые показания приборов учёта за последние `telemetry_days` суток + перечень приборов."""
-    folder.mkdir(parents=True, exist_ok=True)
-    first = len(sim.hours) - 24 * spec.telemetry_days
+def _equipment_devices(spec: Spec, sim: Simulation) -> list[dict[str, Any]]:
+    """Приборы оборудования со своим счётчиком (`metered`): по прибору на единицу."""
     devices: list[dict[str, Any]] = []
     for e in spec.equipment:
         if not e.metered:
@@ -1560,11 +1606,25 @@ def write_telemetry(spec: Spec, sim: Simulation, folder: Path,
                 "title": f"{e.name} №{n}" if e.count > 1 else e.name,
                 "series": sim.units[f"{e.key}#{n}"],
             })
+    return devices
+
+
+def write_telemetry(spec: Spec, sim: Simulation, folder: Path,
+                    meters: list[dict[str, str]] | None = None) -> list[dict[str, Any]]:
+    """Почасовые показания приборов учёта за последние `telemetry_days` суток + перечень приборов.
+
+    Счётчик на вводе (`supply.meter`) пишется последним: начальные показания приборов оборудования берутся
+    из того же ряда случайных чисел и от него не сдвигаются."""
+    folder.mkdir(parents=True, exist_ok=True)
+    first = len(sim.hours) - 24 * spec.telemetry_days
+    devices = _equipment_devices(spec, sim)
+    vvod = input_meter(spec)
+    written = devices + ([{"device": vvod["device"], "series": input_power(sim)}] if vvod else [])
     rng = random.Random(spec.seed + 1)
     with (folder / "показания_приборов_учёта.csv").open("w", encoding="utf-8", newline="") as fh:
         writer = csv.writer(fh, delimiter=";")
         writer.writerow(["Прибор учёта", "Дата и время", "Активная мощность, кВт", "Показание счётчика, кВт·ч"])
-        for device in devices:
+        for device in written:
             meter = rng.uniform(10_000, 90_000) + sum(device["series"][:first])
             for i in range(first, len(sim.hours)):
                 kw = device["series"][i]
@@ -1576,7 +1636,14 @@ def write_telemetry(spec: Spec, sim: Simulation, folder: Path,
         writer.writerow(["Датчик", "Дата и время", "Температура, °C"])
         for i in range(first, len(sim.hours)):
             writer.writerow(["street-t1", sim.hours[i].ts.strftime("%d.%m.%Y %H:%M"), _fmt(sim.hours[i].t_out, 1)])
+    write_device_list(spec, devices, (([vvod] if vvod else []) + (meters or [])), folder)
+    return [{k: v for k, v in d.items() if k != "series"} for d in devices]
 
+
+def write_device_list(spec: Spec, devices: list[dict[str, Any]], meters: list[dict[str, str]],
+                      folder: Path) -> None:
+    """`перечень_приборов_учёта.xlsx`: приборы оборудования, затем счётчики на вводах (электроэнергия, газ,
+    тепло, вода) — в колонке «Оборудование» у них узел ввода из ведомости."""
     from openpyxl import Workbook  # noqa: PLC0415
 
     wb = Workbook()
@@ -1587,12 +1654,79 @@ def write_telemetry(spec: Spec, sim: Simulation, folder: Path,
     by_key = {e.key: e for e in spec.equipment}
     for device in devices:
         ws.append([device["device"], "Меркурий 230", device["title"], by_key[device["equipment"]].location])
-    for meter in meters or []:
+    for meter in meters:
         ws.append([meter["device"], meter["model"], meter["node"], meter["location"]])
     ws.append(["street-t1", "Датчик температуры", "Наружный воздух", "Северная стена"])
-    _fit_columns(ws, (24, 22, max(24, *(len(d["title"]) + 4 for d in devices)), 24))
+    titles = [d["title"] for d in devices] + [m["node"] for m in meters]
+    _fit_columns(ws, (24, 22, max(24, *(len(title) + 4 for title in titles)), 24))
     wb.save(folder / "перечень_приборов_учёта.xlsx")
-    return [{k: v for k, v in d.items() if k != "series"} for d in devices]
+
+
+#: Подпись `Simulation.other` среди невидимого: база и потери идут через ввод мимо всех приборов оборудования.
+OTHER_TITLE = "Неучтённая база (дежурный свет, IT) и потери в сети"
+
+
+def _visible_by_hour(sim: Simulation, window: range, power: list[float], metered: list[list[float]]) -> list[float]:
+    """Доля ввода, которую видят приборы оборудования, по часу суток (0–23) за окно показаний."""
+    seen, total = [0.0] * 24, [0.0] * 24
+    for i in window:
+        hour = sim.hours[i].ts.hour
+        total[hour] += power[i]
+        seen[hour] += sum(series[i] for series in metered)
+    return [round(s / t, 3) if t else 0.0 for s, t in zip(seen, total, strict=True)]
+
+
+def input_visibility(spec: Spec, sim: Simulation) -> dict[str, Any]:
+    """Сколько потребления ввода видят приборы оборудования за окно показаний и что остаётся невидимым.
+
+    Доля — как «Доля видимого по часам суток» Полиметрики: сумма приборов оборудования к вводу. Невидимое —
+    оборудование без прибора (`metered: false`) и неучтённая база с потерями (`other`)."""
+    window = range(len(sim.hours) - 24 * spec.telemetry_days, len(sim.hours))
+    power = input_power(sim)
+    total = sum(power[i] for i in window)
+    metered = [device["series"] for device in _equipment_devices(spec, sim)]
+    seen = sum(series[i] for series in metered for i in window)
+    hidden = [(e.name, sum(sim.units[f"{e.key}#{n}"][i] for n in range(1, e.count + 1) for i in window))
+              for e in spec.equipment if not e.metered]
+    hidden.append((OTHER_TITLE, sum(sim.other[i] for i in window)))
+    return {
+        "days": spec.telemetry_days,
+        "input_kwh": round(total),
+        "metered_kwh": round(seen),
+        "visible_share": round(seen / total, 3),
+        "visible_share_by_hour": _visible_by_hour(sim, window, power, metered),
+        "invisible": [{"title": title, "kwh": round(kwh), "share": round(kwh / total, 3)} for title, kwh in hidden],
+    }
+
+
+def _pct(share: float) -> str:
+    return f"{_fmt(share * 100, 1)} %"
+
+
+def input_answers(spec: Spec, sim: Simulation) -> list[str]:
+    """Раздел «Счётчик на вводе» ответов: куда привяжется прибор, сколько видят приборы и что в невидимом."""
+    vvod = input_meter(spec)
+    if vvod is None:
+        return []
+    seen = input_visibility(spec, sim)
+    by_hour = seen["visible_share_by_hour"]
+    low, high = min(range(24), key=by_hour.__getitem__), max(range(24), key=by_hour.__getitem__)
+    lines = ["", "## Счётчик на вводе", "",
+             (f"Прибор `{vvod['device']}` ({vvod['model']}) в `telemetry/показания_приборов_учёта.csv` — счётчик на "
+              f"вводе «{supply_point(spec)}». Агент привязывает его к узлу «{vvod['node']}» из ведомости "
+              "(класс «Ввод»). Ввод считает весь объект: сумма его показаний за каждый месяц сходится со счётом."),
+             "",
+             (f"За последние {seen['days']} суток приборы оборудования видят {_pct(seen['visible_share'])} "
+              f"потребления ввода ({_fmt(seen['metered_kwh'])} из {_fmt(seen['input_kwh'])} кВт·ч). По часам суток — "
+              f"от {_pct(by_hour[low])} в {low:02d}:00 до {_pct(by_hour[high])} в {high:02d}:00. Это «Доля видимого "
+              "по часам суток» на «Оборудовании и учёте»; по вводу суточный отчёт строит «Профиль дня»."),
+             "", "Невидимое — то, что идёт через ввод мимо приборов:", "",
+             f"| Что | кВт·ч за {seen['days']} суток | Доля ввода |", "|---|---:|---:|",
+             *[f"| {item['title']} | {_fmt(item['kwh'])} | {_pct(item['share'])} |" for item in seen["invisible"]]]
+    if len(spec.supply.get("supply_points") or []) > 1:
+        lines += ["", ("Счётчик один, на точке поставки из счетов. Нагрузка других точек поставки договора идёт через "
+                       "него же — как и в счетах.")]
+    return lines
 
 
 LINK_KIND_TITLES = {"metric": "измерение", "unmeasured": "без измерения"}
@@ -1788,6 +1922,7 @@ def write_answers(spec: Spec, sim: Simulation, bills_: list[Bill], path: Path,
                     f"| {LINK_KIND_TITLES[link.kind]} "
                     f"| {_method_title(link)} |" for link in spec.links]]
     lines += area_answers(spec, sim)
+    lines += input_answers(spec, sim)
     resource_lines, resource_findings = resource_answers(spec, sim, series or {}, rbills or {})
     lines += resource_lines
     findings += resource_findings
@@ -1812,7 +1947,7 @@ _HOW_TO_ALL = """2. В чат помощника приложите ВСЕ фа�
 """
 
 
-def _how_to_tail(step: int) -> str:
+def _how_to_tail(step: int, vvod: str = "") -> str:
     ask = "Спросите помощника о разговоре с технологом: «Что из разговора с технологом стоит внести в модель?»"
     return f"""{step}. {ask}
 
@@ -1820,7 +1955,7 @@ def _how_to_tail(step: int) -> str:
    с `telemetry/перечень_приборов_учёта.xlsx` и напишите «Загрузи показания приборов учёта из файла».
    Подтвердите карточку «Загрузить показания» — почасовые данные уйдут в хранилище показаний за минуту.
    Проверить: «Сколько кВт·ч потребило <оборудование> за <месяц> по суткам?»
-
+{vvod}
 `telemetry/температура_наружного_воздуха.csv` пока не загружайте: он понадобится, когда расчёты начнут
 учитывать погоду.
 
@@ -1859,11 +1994,22 @@ def _area_steps(spec: Spec) -> str:
 """
 
 
+def input_how_to(spec: Spec) -> str:
+    """Абзац о счётчике на вводе в шаге показаний; без `supply.meter` — пусто."""
+    vvod = input_meter(spec)
+    if vvod is None:
+        return ""
+    return f"""   Счётчик на вводе `{vvod['device']}` — в том же файле: помощник привяжет его к узлу «{vvod['node']}»
+   из ведомости. Тогда на «Оборудовании и учёте» появится «Доля видимого по часам суток», а в суточном
+   отчёте — «Профиль дня».
+"""
+
+
 def how_to(spec: Spec) -> str:
     """`КАК ЗАГРУЗИТЬ.md`: без участков — все документы одним сообщением, при участках — выпуск вторым."""
     if not spec.areas:
-        return HOW_TO + resource_how_to(spec)
-    return _HOW_TO_HEAD + _area_steps(spec) + _how_to_tail(5) + resource_how_to(spec, 7)
+        return _HOW_TO_HEAD + _HOW_TO_ALL + _how_to_tail(4, input_how_to(spec)) + resource_how_to(spec)
+    return _HOW_TO_HEAD + _area_steps(spec) + _how_to_tail(5, input_how_to(spec)) + resource_how_to(spec, 7)
 
 
 def resource_how_to(spec: Spec, step: int = 6) -> str:
@@ -1901,6 +2047,12 @@ def pack_upload(upload: Path, target: Path) -> Path:
             if path.is_file():
                 zf.write(path, path.relative_to(upload).as_posix())
     return target
+
+
+def input_summary(spec: Spec, sim: Simulation) -> dict[str, Any]:
+    """`input_meter` сводки: прибор и узел ввода, доля, которую видят приборы, и невидимое; без счётчика — пусто."""
+    vvod = input_meter(spec)
+    return {"input_meter": {**vvod, **input_visibility(spec, sim)}} if vvod else {}
 
 
 def build(spec: Spec, out: Path) -> dict[str, Any]:
@@ -1965,6 +2117,7 @@ def build(spec: Spec, out: Path) -> dict[str, Any]:
             for resource, rows in rbills.items()
         },
         "resource_meters": meters,
+        **input_summary(spec, sim),
         "pdf_font": font is not None,
         "upload_files": [str(p.relative_to(out)) for p in files],
         "upload_zip": str(pack_upload(upload, out.with_name(f"{out.name}-upload.zip"))),

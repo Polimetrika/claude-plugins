@@ -17,7 +17,8 @@
     "max_power_kw": 290,
     "tariff_rub_per_kwh": 7.82,
     "tariff_category": 1,
-    "supply_points": ["ВРУ-0,4 кВ корпуса 3 (ТП-112)"]
+    "supply_points": ["ВРУ-0,4 кВ корпуса 3 (ТП-112)"],
+    "meter": "Меркурий 234"
   },
   "product": {"title": "Кофе обжаренный", "unit": "кг", "daily_min": 1500, "daily_max": 2300},
   "circuits": [
